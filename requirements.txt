@@ -4,3 +4,4 @@ pillow
 watchdog
 numpy
 onnxruntime
+requests
