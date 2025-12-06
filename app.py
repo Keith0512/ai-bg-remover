@@ -16,6 +16,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- 常數設定 (預設模型) ---
+DEFAULT_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
+DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+
 # --- 輔助函式：圖片轉 Base64 ---
 def image_to_base64(image):
     buffered = io.BytesIO()
@@ -26,8 +30,7 @@ def image_to_base64(image):
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    
+    # 定義提示詞與 Payload
     prompt = """
     你是一位專業的電商視覺總監。
     請分析這張已經去背的商品圖片，並構思 4 個能大幅提升轉化率的「高階商品攝影場景」。
@@ -52,7 +55,20 @@ def analyze_image_with_gemini(api_key, image, model_name):
         "generation_config": {"response_mime_type": "application/json"}
     }
     
-    response = requests.post(url, json=payload)
+    # 內部函式：發送請求
+    def _send_request(target_model):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        return requests.post(url, json=payload)
+
+    # 第一次嘗試：使用指定模型 (可能是 Pro)
+    response = _send_request(model_name)
+    
+    # 如果遇到 429 (配額不足) 且當前不是預設模型，則自動降級
+    if response.status_code == 429 and model_name != DEFAULT_TEXT_MODEL:
+        st.toast(f"⚠️ Pro 模型 ({model_name}) 配額不足，自動降級至 Flash 模型...", icon="🔄")
+        time.sleep(1) # 稍作緩衝
+        response = _send_request(DEFAULT_TEXT_MODEL)
+    
     if response.status_code != 200:
         raise Exception(f"API Error: {response.text}")
         
@@ -61,8 +77,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
 # --- 輔助函式：呼叫 Gemini API (生成) ---
 def generate_image_with_gemini(api_key, image, prompt_text, model_name):
     base64_str = image_to_base64(image)
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
     full_prompt = f"""
     Professional product photography masterpiece.
@@ -81,7 +95,20 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
         "generation_config": {"response_modalities": ["IMAGE"]}
     }
     
-    response = requests.post(url, json=payload)
+    # 內部函式：發送請求
+    def _send_request(target_model):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        return requests.post(url, json=payload)
+
+    # 第一次嘗試
+    response = _send_request(model_name)
+
+    # 如果遇到 429 (配額不足) 且當前不是預設模型，則自動降級
+    if response.status_code == 429 and model_name != DEFAULT_IMAGE_MODEL:
+        st.toast(f"⚠️ Pro 生圖模型 ({model_name}) 配額不足，自動降級至 Flash 模型...", icon="🔄")
+        time.sleep(1)
+        response = _send_request(DEFAULT_IMAGE_MODEL)
+    
     if response.status_code != 200:
         raise Exception(f"API Error: {response.text}")
         
@@ -122,10 +149,6 @@ with st.sidebar:
     # API Key 輸入與模型邏輯
     user_api_key = st.text_input("Google API Key (選填)", type="password", help="輸入 API Key 可升級至 Gemini 3 Pro 模型；未輸入則使用預設 Flash 模型")
     
-    # 預設模型 (Flash)
-    default_text_model = "gemini-2.5-flash-preview-09-2025"
-    default_image_model = "gemini-2.5-flash-image-preview"
-    
     # 升級模型 (Pro)
     pro_text_model = "gemini-3-pro-preview"
     pro_image_model = "gemini-3-pro-image-preview"
@@ -134,15 +157,16 @@ with st.sidebar:
         current_api_key = user_api_key
         current_text_model = pro_text_model
         current_image_model = pro_image_model
-        st.success(f"🚀 已升級使用 Pro 模型:\nVision: {pro_text_model}\nImage: {pro_image_model}")
+        st.success(f"🚀 已嘗試啟用 Pro 模型:\nVision: {pro_text_model}\nImage: {pro_image_model}")
+        st.caption("若配額不足將自動切換回 Flash 模型")
     else:
         # 嘗試從 Secrets 讀取預設 Key
         current_api_key = st.secrets.get("GEMINI_API_KEY", "")
-        current_text_model = default_text_model
-        current_image_model = default_image_model
+        current_text_model = DEFAULT_TEXT_MODEL
+        current_image_model = DEFAULT_IMAGE_MODEL
         
         if current_api_key:
-            st.info(f"⚡ 使用預設 Flash 模型:\nVision: {default_text_model}\nImage: {default_image_model}")
+            st.info(f"⚡ 使用預設 Flash 模型:\nVision: {DEFAULT_TEXT_MODEL}\nImage: {DEFAULT_IMAGE_MODEL}")
         else:
             st.warning("⚠️ 未偵測到預設 Key 且未輸入 API Key，生成功能可能無法使用")
 
