@@ -1,0 +1,6 @@
+streamlit
+rembg
+pillow
+watchdog
+numpy
+onnxruntime
