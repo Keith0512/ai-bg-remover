@@ -16,10 +16,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 常數設定 ---
-TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
-IMAGE_MODEL = "gemini-2.5-flash-image-preview"
-
 # --- 輔助函式：圖片轉 Base64 ---
 def image_to_base64(image):
     buffered = io.BytesIO()
@@ -27,10 +23,10 @@ def image_to_base64(image):
     return base64.b64encode(buffered.getvalue()).decode()
 
 # --- 輔助函式：呼叫 Gemini API (分析) ---
-def analyze_image_with_gemini(api_key, image):
+def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
     prompt = """
     你是一位專業的電商視覺總監。
@@ -63,10 +59,10 @@ def analyze_image_with_gemini(api_key, image):
     return json.loads(response.json()['candidates'][0]['content']['parts'][0]['text'])
 
 # --- 輔助函式：呼叫 Gemini API (生成) ---
-def generate_image_with_gemini(api_key, image, prompt_text):
+def generate_image_with_gemini(api_key, image, prompt_text, model_name):
     base64_str = image_to_base64(image)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
     full_prompt = f"""
     Professional product photography masterpiece.
@@ -123,11 +119,33 @@ if 'generated_results' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # API Key 輸入
-    api_key = st.text_input("Google API Key", type="password", help="請輸入 Gemini API Key 以使用生成功能")
-    if not api_key:
-        st.warning("⚠️ 請輸入 API Key 才能使用 AI 生成功能")
+    # API Key 輸入與模型邏輯
+    user_api_key = st.text_input("Google API Key (選填)", type="password", help="輸入 API Key 可升級至 Gemini 3 Pro 模型；未輸入則使用預設 Flash 模型")
+    
+    # 預設模型 (Flash)
+    default_text_model = "gemini-2.5-flash-preview-09-2025"
+    default_image_model = "gemini-2.5-flash-image-preview"
+    
+    # 升級模型 (Pro)
+    pro_text_model = "gemini-3-pro-preview"
+    pro_image_model = "gemini-3-pro-image-preview"
+    
+    if user_api_key:
+        current_api_key = user_api_key
+        current_text_model = pro_text_model
+        current_image_model = pro_image_model
+        st.success(f"🚀 已升級使用 Pro 模型:\nVision: {pro_text_model}\nImage: {pro_image_model}")
+    else:
+        # 嘗試從 Secrets 讀取預設 Key
+        current_api_key = st.secrets.get("GEMINI_API_KEY", "")
+        current_text_model = default_text_model
+        current_image_model = default_image_model
         
+        if current_api_key:
+            st.info(f"⚡ 使用預設 Flash 模型:\nVision: {default_text_model}\nImage: {default_image_model}")
+        else:
+            st.warning("⚠️ 未偵測到預設 Key 且未輸入 API Key，生成功能可能無法使用")
+
     st.divider()
     st.subheader("去背模型選擇")
     
@@ -193,7 +211,7 @@ if uploaded_files:
         st.divider()
         
         # --- AI 分析與生成區 ---
-        if api_key:
+        if current_api_key:
             col_gen_1, col_gen_2 = st.columns([1, 2])
             
             with col_gen_1:
@@ -202,8 +220,9 @@ if uploaded_files:
                 
                 if analyze_btn:
                     try:
-                        with st.spinner("正在觀察商品細節..."):
-                            prompts = analyze_image_with_gemini(api_key, current_data["nobg"])
+                        with st.spinner(f"正在觀察商品細節 (Model: {current_text_model})..."):
+                            # 傳入選擇的 Model
+                            prompts = analyze_image_with_gemini(current_api_key, current_data["nobg"], current_text_model)
                             st.session_state.prompts[selected_file_name] = prompts
                     except Exception as e:
                         st.error(f"分析失敗: {str(e)}")
@@ -233,11 +252,13 @@ if uploaded_files:
                     
                     if generate_btn:
                         try:
-                            with st.spinner("正在佈置場景與打光 (約需 10-20 秒)..."):
+                            with st.spinner(f"正在佈置場景 (Model: {current_image_model})..."):
+                                # 傳入選擇的 Model
                                 result_img = generate_image_with_gemini(
-                                    api_key, 
+                                    current_api_key, 
                                     current_data["nobg"], 
-                                    selected_prompt_data["prompt"]
+                                    selected_prompt_data["prompt"],
+                                    current_image_model
                                 )
                                 # 存入結果
                                 if selected_file_name not in st.session_state.generated_results:
