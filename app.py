@@ -4,193 +4,271 @@ from PIL import Image
 import io
 import zipfile
 import time
+import requests
+import json
+import base64
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="AI 產品圖批次去背神器",
-    page_icon="✂️",
+    page_title="AI 電商圖一條龍生成器",
+    page_icon="🛍️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# --- 常數設定 ---
+TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
+IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+
+# --- 輔助函式：圖片轉 Base64 ---
+def image_to_base64(image):
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+# --- 輔助函式：呼叫 Gemini API (分析) ---
+def analyze_image_with_gemini(api_key, image):
+    base64_str = image_to_base64(image)
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent?key={api_key}"
+    
+    prompt = """
+    你是一位專業的電商視覺總監。
+    請分析這張已經去背的商品圖片，並構思 4 個能大幅提升轉化率的「高階商品攝影場景」。
+    
+    請回傳一個純 JSON Array (不要 Markdown)，格式如下：
+    [
+      { "title": "風格標題", "prompt": "詳細的英文生圖提示詞...", "reason": "為什麼適合此商品" },
+      ...
+    ]
+
+    設計方向：極簡高奢、真實生活感、幾何藝術、自然有機。
+    Prompt 必須是英文，強調 "High resolution, 8k, product photography masterpiece"。
+    """
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": base64_str}}
+            ]
+        }],
+        "generation_config": {"response_mime_type": "application/json"}
+    }
+    
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+        
+    return json.loads(response.json()['candidates'][0]['content']['parts'][0]['text'])
+
+# --- 輔助函式：呼叫 Gemini API (生成) ---
+def generate_image_with_gemini(api_key, image, prompt_text):
+    base64_str = image_to_base64(image)
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={api_key}"
+    
+    full_prompt = f"""
+    Professional product photography masterpiece.
+    Subject: The product in the reference image. KEEP THE PRODUCT EXACTLY AS IS.
+    Background & Atmosphere: {prompt_text}
+    Quality: 8k resolution, highly detailed, commercial advertisement standard.
+    """
+    
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": full_prompt},
+                {"inline_data": {"mime_type": "image/png", "data": base64_str}}
+            ]
+        }],
+        "generation_config": {"response_modalities": ["IMAGE"]}
+    }
+    
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+        
+    # 解析回傳的圖片
+    try:
+        img_b64 = response.json()['candidates'][0]['content']['parts'][0]['inline_data']['data']
+        return Image.open(io.BytesIO(base64.b64decode(img_b64)))
+    except:
+        # 有時候可能會因為安全原因被攔截
+        raise Exception("生成失敗，可能是圖片內容觸發了安全篩選，或模型暫時無法生成。")
+
 # --- 快取模型 Session ---
-# 這樣做可以避免每次去背都重新載入模型，大幅提升速度
 @st.cache_resource
 def get_model_session(model_name):
     return new_session(model_name)
 
 # --- 主標題區 ---
-st.title("✂️ AI 產品圖批次去背工具")
+st.title("🛍️ AI 電商圖一條龍生成器")
 st.markdown("""
-這是一個基於開源 `rembg` (U-2-Net) 技術的自動去背應用。
-- **批次處理**：支援一次上傳多張圖片，系統會自動排程處理。
-- **一鍵打包**：處理完成後可直接下載 ZIP 壓縮包。
+結合 **rembg** 強大去背與 **Gemini Pro** 生成能力。
+1. **去背**：上傳圖片，自動移除背景。
+2. **分析**：AI 自動分析商品並推薦場景。
+3. **生成**：一鍵合成高質感電商廣告圖。
 """)
+
+# --- Session State 初始化 ---
+if 'processed_images' not in st.session_state:
+    st.session_state.processed_images = {} # 用 dict 存，key 是檔名
+if 'prompts' not in st.session_state:
+    st.session_state.prompts = {}
+if 'generated_results' not in st.session_state:
+    st.session_state.generated_results = {}
 
 # --- 側邊欄設定 ---
 with st.sidebar:
-    st.header("⚙️ 設定與上傳")
+    st.header("⚙️ 設定")
     
-    # 定義模型詳細說明資料
+    # API Key 輸入
+    api_key = st.text_input("Google API Key", type="password", help="請輸入 Gemini API Key 以使用生成功能")
+    if not api_key:
+        st.warning("⚠️ 請輸入 API Key 才能使用 AI 生成功能")
+        
+    st.divider()
+    st.subheader("去背模型選擇")
+    
     model_descriptions = {
-        "u2net": {
-            "label": "u2net (標準通用版)",
-            "details": """
-            **特點**：這是 U-2-Net 的原始標準模型。  
-            **優點**：泛用性最高，對大多數物體（人、動物、商品、車輛）都有不錯的效果。  
-            **缺點**：模型檔案較大（約 170MB），運算速度比輕量版稍慢。  
-            **適用情境**：大多數情況的首選。如果你不確定要選哪個，先用這個。
-            """
-        },
-        "u2netp": {
-            "label": "u2netp (輕量快速版)",
-            "details": """
-            **特點**：P 代表 Portable（便攜/輕量化），是 u2net 的縮小版。  
-            **優點**：檔案非常小（約 4MB），運算速度非常快，幾乎不佔記憶體。  
-            **缺點**：精細度較差，對於邊緣複雜的物體（如髮絲、網狀物）去背效果不如標準版，邊緣可能會比較生硬。  
-            **適用情境**：手機端應用、低階電腦，或者你需要批次處理幾千張圖片且對邊緣要求不高時。
-            """
-        },
-        "u2net_human_seg": {
-            "label": "u2net_human_seg (人像專用版)",
-            "details": """
-            **特點**：專門針對「人類」進行訓練的模型。  
-            **優點**：在處理人物照片時表現最好，對於頭髮、衣服皺褶的判斷比通用版準確。  
-            **缺點**：對非人類物體（如桌子、汽車、貓狗）的效果可能很差。  
-            **適用情境**：只用來處理人像（如證件照、模特兒照片）。
-            """
-        },
-        "isnet-general-use": {
-            "label": "isnet-general-use (高細節通用版)",
-            "details": """
-            **特點**：這是基於較新的 IS-Net 架構，通常被視為 u2net 的升級替代品。  
-            **優點**：對於「細微邊緣」（如飄逸的髮絲、動物毛髮、半透明物體）的處理能力通常比 u2net 更好，邊緣過渡更自然。  
-            **適用情境**：高品質去背推薦用這個。特別是當你要去背的物體有複雜邊緣（毛茸茸的玩偶、頭髮很多的人、植物）時。
-            """
-        }
+        "u2net": {"label": "u2net (標準通用)", "details": "泛用性最高，適合大多數情況。"},
+        "isnet-general-use": {"label": "isnet (高細節)", "details": "適合頭髮、毛髮等複雜邊緣。"},
+        "u2net_human_seg": {"label": "human_seg (人像)", "details": "專門處理人像。"},
+        "u2netp": {"label": "u2netp (快速)", "details": "速度最快，適合低階設備。"}
     }
 
-    # 模型選擇選單 (使用 label 作為顯示名稱)
     selected_model_key = st.selectbox(
-        "選擇去背模型",
+        "模型",
         options=list(model_descriptions.keys()),
         format_func=lambda x: model_descriptions[x]["label"],
-        index=0
+        index=1 # 預設改為 isnet，效果較好
     )
-
-    # 動態顯示選定模型的詳細說明
-    st.info(model_descriptions[selected_model_key]["details"])
-
-    # 快速選擇指南 (懶人包) - 使用 Expander 收合
-    with st.expander("📖 快速選擇指南 (懶人包)"):
-        st.markdown("""
-        | 你的需求 | 推薦選擇 |
-        | :--- | :--- |
-        | 不知道選哪個 / 什麼都去 | **u2net** 或 **isnet-general-use** |
-        | 追求最高畫質 / 有毛髮細節 | **isnet-general-use** (大推 👍) |
-        | 只處理人像 / 模特兒 | **u2net_human_seg** |
-        | 電腦跑不動 / 需要極速處理 | **u2netp** |
-        """)
+    st.caption(model_descriptions[selected_model_key]["details"])
     
-    # 載入模型 Session
     session = get_model_session(selected_model_key)
-    
-    st.divider()
-    
-    # 檔案上傳器
-    uploaded_files = st.file_uploader(
-        "📤 請將圖片拖曳至此 (支援 JPG, PNG, WEBP)", 
-        type=['png', 'jpg', 'jpeg', 'webp'], 
-        accept_multiple_files=True
-    )
-    
-    st.caption(f"💡 提示：建議圖片背景與主體有一定對比度，效果最佳。")
 
-# --- 主邏輯區 ---
+# --- 主邏輯：上傳區 ---
+uploaded_files = st.file_uploader(
+    "1️⃣ 上傳商品圖片 (Step 1: Upload)", 
+    type=['png', 'jpg', 'jpeg', 'webp'], 
+    accept_multiple_files=True
+)
+
 if uploaded_files:
-    # 顯示處理狀態
-    status_text = st.empty()
-    progress_bar = st.progress(0)
-    
-    # 用來儲存結果的列表
-    processed_images = []
-    
-    # 預覽區域
-    with st.expander("👁️ 點擊展開/收合即時預覽 (僅顯示前 10 張)", expanded=True):
-        st.write("---")
-        
-        start_time = time.time()
-        
-        for i, file in enumerate(uploaded_files):
-            # 更新狀態
-            status_text.text(f"正在處理第 {i+1} / {len(uploaded_files)} 張圖片: {file.name} ...")
-            
-            # 1. 讀取圖片
-            input_image = Image.open(file)
-            
-            # 2. 執行去背 (使用快取的 session 加速)
-            output_image = remove(input_image, session=session)
-            
-            # 3. 轉為 Bytes 準備下載
-            img_byte_arr = io.BytesIO()
-            output_image.save(img_byte_arr, format='PNG')
-            img_bytes = img_byte_arr.getvalue()
-            
-            # 生成新檔名 (原檔名_no_bg.png)
-            file_name_no_ext = file.name.rsplit('.', 1)[0]
-            new_file_name = f"{file_name_no_ext}_no_bg.png"
-            
-            processed_images.append((new_file_name, img_bytes))
-            
-            # 4. 顯示預覽 (限制數量以防瀏覽器卡頓)
-            if i < 10:
-                col1, col2, col3 = st.columns([1, 1, 0.2])
-                with col1:
-                    st.image(input_image, caption="原始圖片", use_container_width=True)
-                with col2:
-                    st.image(output_image, caption="去背結果", use_container_width=True)
-                with col3:
-                    # 單張下載按鈕
-                    st.download_button(
-                        label="⬇️",
-                        data=img_bytes,
-                        file_name=new_file_name,
-                        mime="image/png",
-                        key=f"btn_{i}"
-                    )
-                st.divider()
-            
-            # 更新進度條
-            progress_bar.progress((i + 1) / len(uploaded_files))
+    # 這裡只做去背處理，不重複執行
+    for file in uploaded_files:
+        if file.name not in st.session_state.processed_images:
+            with st.spinner(f"正在去背: {file.name}..."):
+                input_image = Image.open(file)
+                output_image = remove(input_image, session=session)
+                # 存入 session state
+                st.session_state.processed_images[file.name] = {
+                    "original": input_image,
+                    "nobg": output_image,
+                    "file_obj": file
+                }
 
-    end_time = time.time()
-    duration = round(end_time - start_time, 2)
+    # 顯示處理列表
+    st.divider()
+    st.subheader("2️⃣ 圖片列表與 AI 生成 (Step 2 & 3)")
     
-    # --- 完成後的總結區 ---
-    status_text.success(f"✅ 完成！共處理 {len(uploaded_files)} 張圖片，耗時 {duration} 秒。")
+    # 選擇要處理的圖片 (如果是批次上傳，讓使用者選一張來生成，避免 API 爆量)
+    selected_file_name = st.selectbox("選擇要進行 AI 生成的商品", list(st.session_state.processed_images.keys()))
     
-    # 建立 ZIP 檔
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zf:
-        for file_name, img_data in processed_images:
-            zf.writestr(file_name, img_data)
+    if selected_file_name:
+        current_data = st.session_state.processed_images[selected_file_name]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(current_data["original"], caption="原始圖片", use_container_width=True)
+        with col2:
+            st.image(current_data["nobg"], caption="去背結果", use_container_width=True)
             
-    # 下載全部按鈕
-    st.markdown("### 📥 下載專區")
-    col_dl_1, col_dl_2, col_dl_3 = st.columns([1, 2, 1])
-    with col_dl_2:
-        st.download_button(
-            label=f"📦 下載所有去背圖片 (ZIP 壓縮包) - {len(processed_images)} 張",
-            data=zip_buffer.getvalue(),
-            file_name="removed_backgrounds.zip",
-            mime="application/zip",
-            use_container_width=True,
-            type="primary"
-        )
+        # 下載去背圖按鈕
+        img_byte_arr = io.BytesIO()
+        current_data["nobg"].save(img_byte_arr, format='PNG')
+        st.download_button("⬇️ 下載此去背圖", img_byte_arr.getvalue(), f"{selected_file_name}_nobg.png", "image/png")
+
+        st.divider()
+        
+        # --- AI 分析與生成區 ---
+        if api_key:
+            col_gen_1, col_gen_2 = st.columns([1, 2])
+            
+            with col_gen_1:
+                st.markdown("#### AI 場景分析")
+                analyze_btn = st.button("🪄 分析商品並推薦場景", key="analyze_btn", type="primary")
+                
+                if analyze_btn:
+                    try:
+                        with st.spinner("正在觀察商品細節..."):
+                            prompts = analyze_image_with_gemini(api_key, current_data["nobg"])
+                            st.session_state.prompts[selected_file_name] = prompts
+                    except Exception as e:
+                        st.error(f"分析失敗: {str(e)}")
+
+                # 顯示 Prompt 選項
+                selected_prompt_data = None
+                if selected_file_name in st.session_state.prompts:
+                    prompts = st.session_state.prompts[selected_file_name]
+                    
+                    # 使用 Radio 或 Selectbox 讓使用者選
+                    prompt_options = [p["title"] for p in prompts]
+                    selected_prompt_title = st.radio("選擇一種風格:", prompt_options)
+                    
+                    # 找到對應的完整資料
+                    selected_prompt_data = next((p for p in prompts if p["title"] == selected_prompt_title), None)
+                    
+                    if selected_prompt_data:
+                        st.info(f"💡 設計理念: {selected_prompt_data['reason']}")
+                        with st.expander("查看完整 Prompt"):
+                            st.code(selected_prompt_data['prompt'])
+
+            with col_gen_2:
+                st.markdown("#### AI 最終生成")
+                
+                if selected_prompt_data:
+                    generate_btn = st.button(f"🎨 生成：{selected_prompt_data['title']}", type="primary")
+                    
+                    if generate_btn:
+                        try:
+                            with st.spinner("正在佈置場景與打光 (約需 10-20 秒)..."):
+                                result_img = generate_image_with_gemini(
+                                    api_key, 
+                                    current_data["nobg"], 
+                                    selected_prompt_data["prompt"]
+                                )
+                                # 存入結果
+                                if selected_file_name not in st.session_state.generated_results:
+                                    st.session_state.generated_results[selected_file_name] = []
+                                st.session_state.generated_results[selected_file_name].insert(0, result_img) # 最新的放前面
+                                
+                        except Exception as e:
+                            st.error(f"生成失敗: {str(e)}")
+
+                # 顯示生成結果歷史
+                if selected_file_name in st.session_state.generated_results:
+                    results = st.session_state.generated_results[selected_file_name]
+                    if results:
+                        st.success("✨ 生成完成！")
+                        for idx, img in enumerate(results):
+                            st.image(img, caption=f"生成結果 #{len(results)-idx}", use_container_width=True)
+                            
+                            # 下載按鈕
+                            res_byte_arr = io.BytesIO()
+                            img.save(res_byte_arr, format='PNG')
+                            st.download_button(
+                                f"⬇️ 下載結果圖 #{len(results)-idx}", 
+                                res_byte_arr.getvalue(), 
+                                f"gen_{selected_file_name}_{idx}.png", 
+                                "image/png",
+                                key=f"dl_gen_{idx}"
+                            )
+                            st.divider()
+        else:
+            st.info("👈 請在左側設定輸入 API Key 以解鎖 AI 生成功能")
 
 else:
     # 歡迎畫面
-    st.markdown("### 👋 歡迎使用")
-    st.markdown("請從左側側邊欄上傳圖片以開始使用。第一次使用特定模型時，系統會自動下載模型檔案，請稍候。")
-    
-    st.info("支援批次拖拉上傳，自動打包下載。")
+    st.info("請上傳圖片以開始。支援批次上傳。")
