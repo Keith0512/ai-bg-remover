@@ -39,7 +39,7 @@ def check_pro_model_access(api_key):
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {
-        "contents": [{"parts": [{"text": "Test"}]}],
+        "contents": [{"parts": [{"text": "Ping"}]}],
         "generation_config": {"max_output_tokens": 1} # 極小化 token 消耗
     }
     try:
@@ -81,7 +81,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
 
     response = _send_request(model_name)
     
-    # 執行期間若遇到問題，嘗試降級
+    # 雙重保險：執行期間若遇到問題，再次嘗試降級
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
         st.toast(f"⚠️ Pro 模型 ({model_name}) 執行失敗 (Code: {response.status_code})，切換至 Flash 重試...", icon="🔄")
         time.sleep(1)
@@ -125,7 +125,7 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
 
     response = _send_request(model_name)
 
-    # 執行期間若遇到問題，嘗試降級
+    # 雙重保險：執行期間若遇到問題，再次嘗試降級
     if response.status_code != 200 and model_name == PRO_IMAGE_MODEL:
         st.toast(f"⚠️ Pro 生圖模型 ({model_name}) 執行失敗，切換至 Flash 重試...", icon="🔄")
         time.sleep(1)
@@ -175,7 +175,7 @@ def get_model_session(model_name):
 st.title("🛍️ AI 電商圖一條龍生成器")
 st.markdown(f"""
 結合 **rembg** 與 **Gemini** 生成能力。
-預設使用 **Flash ({FLASH_TEXT_MODEL})**，輸入 API Key 可解鎖 **Pro** 模型。
+預設使用 **Flash ({FLASH_TEXT_MODEL})**，輸入綁定帳單的 API Key 可解鎖 **Pro** 模型。
 """)
 
 # --- Session State 初始化 ---
@@ -209,7 +209,8 @@ with st.sidebar:
                 st.toast("✅ 驗證成功！已啟用 Gemini 3 Pro 模型", icon="🚀")
             else:
                 st.session_state.user_model_tier = "FLASH"
-                st.toast("⚠️ 此 Key 無法使用 Pro 模型 (可能未綁定帳單)，已自動降級為 Flash", icon="🛡️")
+                # 這裡顯示您要求的警告
+                st.error("⚠️ 無法啟用 Gemini 3 Pro 模型。\n\n您的 API Key 可能未綁定帳單。系統已自動降級為 Flash 模型。\n\n💡 若要使用 Pro 功能，請前往 Google AI Studio 綁定信用卡/帳單。")
             st.session_state.last_validated_key = user_api_key
     elif not user_api_key:
         # 如果使用者清空 Key，重置為 Flash
@@ -226,10 +227,11 @@ with st.sidebar:
         current_image_model = FLASH_IMAGE_MODEL
         
         status_msg = "⚡ **Flash Mode (Default)**"
-        if user_api_key: # 有輸入 Key 但驗證失敗
-            status_msg += "\n(您的 Key 僅支援免費版)"
-        
         st.info(f"{status_msg}\nVision: {FLASH_TEXT_MODEL}\nImage: {FLASH_IMAGE_MODEL}")
+        
+        # 如果有輸入 Key 但不在 Pro 模式，顯示一個常駐的小提示
+        if user_api_key and st.session_state.user_model_tier == "FLASH":
+            st.caption("ℹ️ 您目前的 Key 僅支援免費版 (Flash)")
 
     st.divider()
     st.subheader("去背模型")
