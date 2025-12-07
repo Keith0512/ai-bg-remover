@@ -7,7 +7,7 @@ import time
 import requests
 import json
 import base64
-import gc  # 新增：垃圾回收機制
+import gc  # 記憶體回收機制
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -28,7 +28,6 @@ def pil_to_bytes(image, format="PNG", quality=85):
     """將 PIL 圖片轉為 Bytes 以節省 Session State 記憶體"""
     buf = io.BytesIO()
     if format == "JPEG":
-        # 如果是 JPEG，必須確保是 RGB 模式 (去背圖通常有 Alpha 通道，不能直接存 JPEG)
         if image.mode in ('RGBA', 'LA'):
             background = Image.new('RGB', image.size, (255, 255, 255))
             background.paste(image, mask=image.split()[-1])
@@ -42,12 +41,15 @@ def bytes_to_pil(image_bytes):
     """從 Bytes 還原為 PIL 圖片"""
     return Image.open(io.BytesIO(image_bytes))
 
-# --- 修改後的輔助函式：強制縮圖以節省 Token (關鍵修正) ---
+# --- 關鍵防護：強制縮圖以節省 Token ---
 def image_to_base64(image, max_size=(1024, 1024)):
-    # 複製圖片以免影響原始物件
+    """
+    將圖片轉為 Base64，並限制最大尺寸。
+    🛡️ 保護機制：無論上傳多大的圖，都會在此被攔截並縮小，防止 API 費用暴增。
+    """
     img_copy = image.copy()
-    # 強制縮圖 (保持比例)
     img_copy.thumbnail(max_size, Image.Resampling.LANCZOS)
+    
     buffered = io.BytesIO()
     if img_copy.mode == 'RGBA':
         img_copy.save(buffered, format="PNG")
@@ -71,6 +73,7 @@ def check_pro_model_access(api_key):
 
 # --- 輔助函式：呼叫 Gemini API (分析) ---
 def analyze_image_with_gemini(api_key, image, model_name):
+    # 這裡也會經過縮圖保護
     base64_str = image_to_base64(image)
     
     prompt = """
@@ -107,7 +110,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     response = _send_request(model_name)
     
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
-        st.toast(f"⚠️ Pro 模型 ({model_name}) 異常 (Code: {response.status_code})，切換至 Flash 重試...", icon="🔄")
+        st.toast(f"⚠️ Pro 模型 ({model_name}) 異常，切換至 Flash 重試...", icon="🔄")
         time.sleep(1)
         response = _send_request(FLASH_TEXT_MODEL)
     
@@ -130,7 +133,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
              
         parts = candidate.get('content', {}).get('parts', [])
         if not parts:
-            raise Exception("模型回傳內容缺少 'parts' 欄位，可能是生成被中斷。")
+            raise Exception("模型回傳內容缺少 'parts' 欄位。")
             
         return json.loads(parts[0]['text'])
     except Exception as e:
@@ -138,6 +141,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
 
 # --- 輔助函式：呼叫 Gemini API (生成) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
+    # 1. 商品圖：經過縮圖保護
     product_b64 = image_to_base64(product_image)
     
     full_prompt = f"""
@@ -159,6 +163,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     parts.append({"inline_data": {"mime_type": "image/png", "data": product_b64}})
     
     if ref_image:
+        # 2. 參考圖：✅ 這裡同樣呼叫了 image_to_base64，所以絕對有縮圖保護
         ref_b64 = image_to_base64(ref_image)
         parts.append({"inline_data": {"mime_type": "image/png", "data": ref_b64}})
 
@@ -289,7 +294,7 @@ with st.sidebar:
     session = get_model_session(selected_model_key)
     
     st.divider()
-    st.caption("v1.3 (Memory Optimized)")
+    st.caption("v1.4 (Final Secure)")
 
 # --- 主邏輯：上傳區 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -324,7 +329,6 @@ if uploaded_files:
     st.divider()
     st.subheader("2️⃣ AI 分析與生成")
     
-    # 確保有檔案才顯示選單
     if st.session_state.processed_images:
         selected_file_name = st.selectbox("選擇商品", list(st.session_state.processed_images.keys()))
         
@@ -339,7 +343,6 @@ if uploaded_files:
             with col1: st.image(original_pil, caption="原始", use_container_width=True)
             with col2: st.image(nobg_pil, caption="去背", use_container_width=True)
             
-            # 下載去背
             st.download_button("⬇️ 下載去背圖", current_data["nobg_data"], f"{selected_file_name}_nobg.png", "image/png")
 
             st.divider()
@@ -394,7 +397,6 @@ if uploaded_files:
                         st.markdown("#### 🖼️ 生成結果")
                         for i, img in enumerate(st.session_state.generated_results[selected_file_name]):
                             st.image(img, caption=f"Result #{len(st.session_state.generated_results[selected_file_name])-i}", use_container_width=True)
-                            # 儲存結果時也要注意記憶體，這裡暫時直接轉 bytes 供下載
                             buf = io.BytesIO()
                             img.save(buf, format='PNG')
                             st.download_button(f"⬇️ 下載", buf.getvalue(), f"gen_{i}.png", "image/png", key=f"d_{i}")
