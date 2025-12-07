@@ -117,9 +117,9 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
     # 第一次嘗試
     response = _send_request(model_name)
 
-    # 如果遇到 429 (配額不足) 且當前不是預設模型，則自動降級
-    if response.status_code == 429 and model_name != DEFAULT_IMAGE_MODEL:
-        st.toast(f"⚠️ Pro 生圖模型 ({model_name}) 配額不足，自動降級至 Flash 模型...", icon="🔄")
+    # 如果遇到 任何錯誤 (非200) 且當前不是預設模型 (例如是 Pro)，則自動降級
+    if response.status_code != 200 and model_name != DEFAULT_IMAGE_MODEL:
+        st.toast(f"⚠️ Pro 生圖模型 ({model_name}) 發生錯誤 (Code: {response.status_code})，自動切換至 Flash 模型...", icon="🔄")
         time.sleep(1)
         response = _send_request(DEFAULT_IMAGE_MODEL)
     
