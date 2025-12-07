@@ -33,14 +33,10 @@ def image_to_base64(image):
 
 # --- 核心功能：驗證 API Key 權限 ---
 def check_pro_model_access(api_key):
-    """
-    發送一個極輕量的請求給 Pro 模型，測試是否可用。
-    如果回傳 200，代表有權限 (有綁定帳單)；否則回傳 False。
-    """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {
         "contents": [{"parts": [{"text": "Ping"}]}],
-        "generation_config": {"max_output_tokens": 1} # 極小化 token 消耗
+        "generation_config": {"max_output_tokens": 1}
     }
     try:
         response = requests.post(url, json=payload)
@@ -81,7 +77,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
 
     response = _send_request(model_name)
     
-    # 雙重保險：執行期間若遇到問題，再次嘗試降級
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
         st.toast(f"⚠️ Pro 模型 ({model_name}) 執行失敗 (Code: {response.status_code})，切換至 Flash 重試...", icon="🔄")
         time.sleep(1)
@@ -94,24 +89,36 @@ def analyze_image_with_gemini(api_key, image, model_name):
         
     return json.loads(response.json()['candidates'][0]['content']['parts'][0]['text'])
 
-# --- 輔助函式：呼叫 Gemini API (生成) ---
-def generate_image_with_gemini(api_key, image, prompt_text, model_name):
-    base64_str = image_to_base64(image)
+# --- 輔助函式：呼叫 Gemini API (生成 - 支援雙圖與自訂提示詞) ---
+def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
+    product_b64 = image_to_base64(product_image)
     
+    # 組合最終的 Prompt
     full_prompt = f"""
     Professional product photography masterpiece.
-    Subject: The product in the reference image. KEEP THE PRODUCT EXACTLY AS IS.
-    Background & Atmosphere: {prompt_text}
-    Quality: 8k resolution, highly detailed, commercial advertisement standard.
+    Subject: The FIRST image provided is the PRODUCT. KEEP THE PRODUCT APPEARANCE EXACTLY AS IS.
     """
     
+    if ref_image:
+        full_prompt += "\nReference: The SECOND image provided is a STYLE/CHARACTER REFERENCE. Integrate the product into a scene consistent with this reference."
+        
+    full_prompt += f"\nBackground & Atmosphere: {base_prompt}"
+    
+    if user_extra_prompt:
+        full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
+        
+    full_prompt += "\nQuality: 8k resolution, highly detailed, commercial advertisement standard."
+
+    # 建構 Parts (支援多圖)
+    parts = [{"text": full_prompt}]
+    parts.append({"inline_data": {"mime_type": "image/png", "data": product_b64}})
+    
+    if ref_image:
+        ref_b64 = image_to_base64(ref_image)
+        parts.append({"inline_data": {"mime_type": "image/png", "data": ref_b64}})
+
     payload = {
-        "contents": [{
-            "parts": [
-                {"text": full_prompt},
-                {"inline_data": {"mime_type": "image/png", "data": base64_str}}
-            ]
-        }],
+        "contents": [{"parts": parts}],
         "generation_config": {"response_modalities": ["IMAGE"]}
     }
     
@@ -125,7 +132,6 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
 
     response = _send_request(model_name)
 
-    # 雙重保險：執行期間若遇到問題，再次嘗試降級
     if response.status_code != 200 and model_name == PRO_IMAGE_MODEL:
         st.toast(f"⚠️ Pro 生圖模型 ({model_name}) 執行失敗，切換至 Flash 重試...", icon="🔄")
         time.sleep(1)
@@ -185,22 +191,18 @@ if 'prompts' not in st.session_state:
     st.session_state.prompts = {}
 if 'generated_results' not in st.session_state:
     st.session_state.generated_results = {}
-# 用來記錄上次驗證過的 Key，避免重複驗證
 if 'last_validated_key' not in st.session_state:
     st.session_state.last_validated_key = None
 if 'user_model_tier' not in st.session_state:
-    st.session_state.user_model_tier = "FLASH" # FLASH or PRO
+    st.session_state.user_model_tier = "FLASH" 
 
 # --- 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
     
     user_api_key = st.text_input("Google API Key (選填)", type="password", help="輸入後將自動測試是否支援 Pro 模型")
-    
-    # --- 關鍵邏輯：API Key 驗證與模型選擇 ---
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
     
-    # 當 API Key 改變時，執行驗證
     if user_api_key and user_api_key != st.session_state.last_validated_key:
         with st.spinner("正在驗證 API Key 權限 (Gemini 3 Pro)..."):
             is_pro = check_pro_model_access(user_api_key)
@@ -209,15 +211,12 @@ with st.sidebar:
                 st.toast("✅ 驗證成功！已啟用 Gemini 3 Pro 模型", icon="🚀")
             else:
                 st.session_state.user_model_tier = "FLASH"
-                # 這裡顯示您要求的警告
-                st.error("⚠️ 無法啟用 Gemini 3 Pro 模型。\n\n您的 API Key 可能未綁定帳單。系統已自動降級為 Flash 模型。\n\n💡 若要使用 Pro 功能，請前往 Google AI Studio 綁定信用卡/帳單。")
+                st.error("⚠️ 無法啟用 Gemini 3 Pro 模型。\n\n您的 API Key 可能未綁定帳單。系統已自動降級為 Flash 模型。")
             st.session_state.last_validated_key = user_api_key
     elif not user_api_key:
-        # 如果使用者清空 Key，重置為 Flash
         st.session_state.user_model_tier = "FLASH"
         st.session_state.last_validated_key = None
 
-    # 根據驗證結果設定當前模型
     if st.session_state.user_model_tier == "PRO" and user_api_key:
         current_text_model = PRO_TEXT_MODEL
         current_image_model = PRO_IMAGE_MODEL
@@ -225,11 +224,8 @@ with st.sidebar:
     else:
         current_text_model = FLASH_TEXT_MODEL
         current_image_model = FLASH_IMAGE_MODEL
-        
         status_msg = "⚡ **Flash Mode (Default)**"
         st.info(f"{status_msg}\nVision: {FLASH_TEXT_MODEL}\nImage: {FLASH_IMAGE_MODEL}")
-        
-        # 如果有輸入 Key 但不在 Pro 模式，顯示一個常駐的小提示
         if user_api_key and st.session_state.user_model_tier == "FLASH":
             st.caption("ℹ️ 您目前的 Key 僅支援免費版 (Flash)")
 
@@ -264,7 +260,6 @@ if uploaded_files:
         with col1: st.image(current_data["original"], caption="原始", use_container_width=True)
         with col2: st.image(current_data["nobg"], caption="去背", use_container_width=True)
         
-        # 下載去背
         buf = io.BytesIO()
         current_data["nobg"].save(buf, format='PNG')
         st.download_button("⬇️ 下載去背圖", buf.getvalue(), f"{selected_file_name}_nobg.png", "image/png")
@@ -272,8 +267,10 @@ if uploaded_files:
         st.divider()
         if final_api_key:
             c1, c2 = st.columns([1, 2])
+            
+            # --- 左欄：分析與選擇 Prompt ---
             with c1:
-                if st.button("🪄 分析場景", type="primary"):
+                if st.button("🪄 1. 分析場景 (Analyze)", type="primary"):
                     try:
                         with st.spinner(f"分析中 ({current_text_model})..."):
                             prompts = analyze_image_with_gemini(final_api_key, current_data["nobg"], current_text_model)
@@ -283,27 +280,60 @@ if uploaded_files:
                 selected_prompt_data = None
                 if selected_file_name in st.session_state.prompts:
                     prompts = st.session_state.prompts[selected_file_name]
-                    title = st.radio("風格:", [p["title"] for p in prompts])
+                    title = st.radio("選擇 AI 推薦風格:", [p["title"] for p in prompts])
                     selected_prompt_data = next((p for p in prompts if p["title"] == title), None)
                     if selected_prompt_data:
                         st.info(selected_prompt_data['reason'])
-                        with st.expander("Prompt"): st.code(selected_prompt_data['prompt'])
+                        with st.expander("查看原始 Prompt"): st.code(selected_prompt_data['prompt'])
 
+            # --- 右欄：進階設定與生成 ---
             with c2:
-                if selected_prompt_data and st.button(f"🎨 生成：{selected_prompt_data['title']}", type="primary"):
-                    try:
-                        with st.spinner(f"生成中 ({current_image_model})..."):
-                            img = generate_image_with_gemini(final_api_key, current_data["nobg"], selected_prompt_data["prompt"], current_image_model)
-                            if selected_file_name not in st.session_state.generated_results:
-                                st.session_state.generated_results[selected_file_name] = []
-                            st.session_state.generated_results[selected_file_name].insert(0, img)
-                    except Exception as e: st.error(str(e))
+                if selected_prompt_data:
+                    st.markdown("#### 🛠️ 2. 進階設定 (Optional)")
+                    
+                    # 1. 自訂提示詞輸入
+                    user_extra_prompt = st.text_area(
+                        "📝 自訂額外提示詞 (例如: Add a human hand holding the product)", 
+                        placeholder="請用英文輸入，會疊加在上方選擇的風格中..."
+                    )
+                    
+                    # 2. 參考圖上傳
+                    ref_image_file = st.file_uploader(
+                        "🖼️ 上傳參考圖片 (例如: 人物、特定背景、風格圖)", 
+                        type=['png', 'jpg', 'jpeg', 'webp'],
+                        key="ref_img_uploader"
+                    )
+                    
+                    ref_image = None
+                    if ref_image_file:
+                        ref_image = Image.open(ref_image_file)
+                        st.image(ref_image, caption="已載入參考圖", width=150)
+
+                    st.markdown("---")
+                    
+                    if st.button(f"🎨 3. 開始生成：{selected_prompt_data['title']}", type="primary"):
+                        try:
+                            with st.spinner(f"生成中 ({current_image_model})..."):
+                                img = generate_image_with_gemini(
+                                    api_key=final_api_key, 
+                                    product_image=current_data["nobg"], 
+                                    base_prompt=selected_prompt_data["prompt"], 
+                                    model_name=current_image_model,
+                                    user_extra_prompt=user_extra_prompt,
+                                    ref_image=ref_image
+                                )
+                                if selected_file_name not in st.session_state.generated_results:
+                                    st.session_state.generated_results[selected_file_name] = []
+                                st.session_state.generated_results[selected_file_name].insert(0, img)
+                        except Exception as e: st.error(str(e))
                 
+                # 顯示結果
                 if selected_file_name in st.session_state.generated_results:
+                    st.markdown("#### 🖼️ 生成結果")
                     for i, img in enumerate(st.session_state.generated_results[selected_file_name]):
-                        st.image(img, caption=f"結果 #{i+1}", use_container_width=True)
+                        st.image(img, caption=f"Result #{len(st.session_state.generated_results[selected_file_name])-i}", use_container_width=True)
                         buf = io.BytesIO()
                         img.save(buf, format='PNG')
-                        st.download_button(f"⬇️ 下載 #{i+1}", buf.getvalue(), f"gen_{i}.png", "image/png", key=f"d_{i}")
+                        st.download_button(f"⬇️ 下載這張圖", buf.getvalue(), f"gen_{i}.png", "image/png", key=f"d_{i}")
         else:
             st.info("👈 請輸入 API Key 以使用 AI 功能")
