@@ -130,11 +130,48 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
         
     # 解析回傳的圖片
     try:
-        img_b64 = response.json()['candidates'][0]['content']['parts'][0]['inline_data']['data']
-        return Image.open(io.BytesIO(base64.b64decode(img_b64)))
-    except:
-        # 有時候可能會因為安全原因被攔截
-        raise Exception("生成失敗，可能是圖片內容觸發了安全篩選，或模型暫時無法生成。")
+        response_json = response.json()
+        
+        # 檢查是否有候選結果
+        if 'candidates' not in response_json or not response_json['candidates']:
+             # 有時 API 雖然 200 OK 但沒有 candidates (例如被過濾)
+             if 'promptFeedback' in response_json:
+                 block_reason = response_json['promptFeedback'].get('blockReason')
+                 if block_reason:
+                     raise Exception(f"Prompt 被系統攔截: {block_reason}")
+             raise Exception("模型未回傳任何候選結果 (No candidates returned)。")
+
+        candidate = response_json['candidates'][0]
+        
+        # 檢查是否因為安全原因結束
+        if candidate.get('finishReason') == 'SAFETY':
+             safety_ratings = candidate.get('safetyRatings', [])
+             # 簡單列出觸發的安全類別
+             reasons = [r['category'] for r in safety_ratings if r['probability'] in ['MEDIUM', 'HIGH']]
+             raise Exception(f"圖片生成因「安全政策」被攔截。觸發類別: {', '.join(reasons)}。請嘗試調整風格描述。")
+
+        parts = candidate.get('content', {}).get('parts', [])
+        if not parts:
+             raise Exception("模型回傳內容為空。")
+             
+        # 嘗試取得 inlineData (REST API 標準) 或 inline_data (相容舊版/SDK)
+        part = parts[0]
+        inline_data = part.get('inlineData') or part.get('inline_data')
+        
+        if inline_data:
+            img_b64 = inline_data.get('data')
+            if img_b64:
+                return Image.open(io.BytesIO(base64.b64decode(img_b64)))
+        
+        # 如果沒有圖片數據，檢查是否有文字錯誤訊息
+        if part.get('text'):
+             raise Exception(f"模型回傳了文字而非圖片: '{part.get('text')[:100]}...'。這表示模型拒絕生成圖片，請檢查 Prompt 或更換模型。")
+             
+        raise Exception(f"無法解析圖片數據，API 回傳結構異常。")
+
+    except Exception as e:
+        # 捕捉並重新拋出具體錯誤，保留原始錯誤訊息
+        raise Exception(f"生成失敗: {str(e)}")
 
 # --- 快取模型 Session ---
 @st.cache_resource
