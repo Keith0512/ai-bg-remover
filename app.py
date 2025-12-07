@@ -91,8 +91,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
         for i in range(3):
             try:
                 res = requests.post(url, json=payload)
-                # 如果是 200 OK 或 4xx (Client Error) 但不是 429，直接回傳
-                # 429 (Too Many Requests) 和 5xx (Server Error) 會進入重試
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429):
                     return res
             except requests.exceptions.RequestException:
@@ -113,8 +111,28 @@ def analyze_image_with_gemini(api_key, image, model_name):
         if response.status_code == 429:
             raise Exception("API 配額已達上限 (429)，請稍後再試。")
         raise Exception(f"API Error: {response.text}")
+    
+    # --- 修正後的解析邏輯 (防止 'parts' KeyError) ---
+    try:
+        response_json = response.json()
+        if 'candidates' not in response_json or not response_json['candidates']:
+             if 'promptFeedback' in response_json:
+                 block_reason = response_json['promptFeedback'].get('blockReason')
+                 if block_reason: raise Exception(f"Prompt 被攔截: {block_reason}")
+             raise Exception("模型未回傳結果 (No candidates)。")
         
-    return json.loads(response.json()['candidates'][0]['content']['parts'][0]['text'])
+        candidate = response_json['candidates'][0]
+        if candidate.get('finishReason') == 'SAFETY':
+             raise Exception("分析內容因安全政策被攔截，請嘗試更換圖片或模型。")
+             
+        parts = candidate.get('content', {}).get('parts', [])
+        if not parts:
+            raise Exception("模型回傳內容缺少 'parts' 欄位，可能是生成被中斷。")
+            
+        return json.loads(parts[0]['text'])
+    except Exception as e:
+        # 如果是 JSON 解析錯誤，嘗試印出原始文字幫助除錯
+        raise Exception(f"解析分析結果失敗: {str(e)}")
 
 # --- 輔助函式：呼叫 Gemini API (生成 - 支援雙圖與自訂提示詞) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
