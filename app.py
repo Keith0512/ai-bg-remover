@@ -55,10 +55,16 @@ def analyze_image_with_gemini(api_key, image, model_name):
         "generation_config": {"response_mime_type": "application/json"}
     }
     
-    # 內部函式：發送請求
+    # 內部函式：發送請求 (含 Retry 機制)
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-        return requests.post(url, json=payload)
+        # 最多重試 3 次 (等待 2s, 4s, 8s)
+        for i in range(3):
+            res = requests.post(url, json=payload)
+            if res.status_code != 429:
+                return res
+            time.sleep(2 ** (i + 1)) # 指數退避
+        return res
 
     # 第一次嘗試：使用指定模型 (可能是 Pro)
     response = _send_request(model_name)
@@ -70,6 +76,8 @@ def analyze_image_with_gemini(api_key, image, model_name):
         response = _send_request(DEFAULT_TEXT_MODEL)
     
     if response.status_code != 200:
+        if response.status_code == 429:
+            raise Exception("API 配額已達上限 (429)。Google 免費版 API 有每分鐘請求限制，請稍等 1 分鐘後再試。")
         raise Exception(f"API Error: {response.text}")
         
     return json.loads(response.json()['candidates'][0]['content']['parts'][0]['text'])
@@ -95,10 +103,16 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
         "generation_config": {"response_modalities": ["IMAGE"]}
     }
     
-    # 內部函式：發送請求
+    # 內部函式：發送請求 (含 Retry 機制)
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-        return requests.post(url, json=payload)
+        # 最多重試 3 次 (等待 2s, 4s, 8s)
+        for i in range(3):
+            res = requests.post(url, json=payload)
+            if res.status_code != 429:
+                return res
+            time.sleep(2 ** (i + 1)) # 指數退避
+        return res
 
     # 第一次嘗試
     response = _send_request(model_name)
@@ -110,6 +124,8 @@ def generate_image_with_gemini(api_key, image, prompt_text, model_name):
         response = _send_request(DEFAULT_IMAGE_MODEL)
     
     if response.status_code != 200:
+        if response.status_code == 429:
+            raise Exception("API 配額已達上限 (429)。Google 免費版 API 有每分鐘請求限制，請稍等 1 分鐘後再試。")
         raise Exception(f"API Error: {response.text}")
         
     # 解析回傳的圖片
