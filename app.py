@@ -69,9 +69,9 @@ def analyze_image_with_gemini(api_key, image, model_name):
     # 第一次嘗試：使用指定模型 (可能是 Pro)
     response = _send_request(model_name)
     
-    # 如果遇到 429 (配額不足) 且當前不是預設模型，則自動降級
-    if response.status_code == 429 and model_name != DEFAULT_TEXT_MODEL:
-        st.toast(f"⚠️ Pro 模型 ({model_name}) 配額不足，自動降級至 Flash 模型...", icon="🔄")
+    # 如果遇到 任何錯誤 (非200) 且當前不是預設模型，則自動降級
+    if response.status_code != 200 and model_name != DEFAULT_TEXT_MODEL:
+        st.toast(f"⚠️ Pro 模型 ({model_name}) 發生錯誤 (Code: {response.status_code})，自動降級至 Flash 模型...", icon="🔄")
         time.sleep(1) # 稍作緩衝
         response = _send_request(DEFAULT_TEXT_MODEL)
     
