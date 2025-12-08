@@ -30,18 +30,18 @@ def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+        <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
             background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
             padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
         ">
             📋 複製圖片
         </button>
-        <span id="msg_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
+        <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
     </div>
     <script>
     async function copyImage_{key_suffix}() {{
-        const btn = document.getElementById("btn_{key_suffix}");
-        const msg = document.getElementById("msg_{key_suffix}");
+        const btn = document.getElementById("btn_img_{key_suffix}");
+        const msg = document.getElementById("msg_img_{key_suffix}");
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         try {{
@@ -53,6 +53,7 @@ def copy_image_button(image_bytes, key_suffix):
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
+            console.error(err);
             msg.innerText = "❌ 失敗";
             msg.style.color = "red";
         }} finally {{
@@ -131,20 +132,21 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- API Key 淨化 ---
+# --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key ---
+# --- 核心功能：驗證 API Key (回歸 v1.4 無限等待) ---
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
     try: 
+        # 移除 timeout，只要沒斷線就一直等
         return requests.post(url, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (新增：AI 推薦 + 強制標註) ---
+# --- 分析函式 (回歸 v1.4 無限等待) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -162,10 +164,9 @@ def analyze_image_with_gemini(api_key, image, model_name):
     5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景)
     
     【重要指令】：
-    1. 對於第 5 個「AI 獨家推薦」方向，請在 title 欄位開頭加上 "🤖 AI推薦：" 字樣，例如 "🤖 AI推薦：賽博龐克風格"。
-    2. 所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
+    1. 所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
     "High resolution, 8k, extreme detail, product photography masterpiece, sharp focus, professional lighting, cinematic composition"
-    3. "reason" 欄位必須使用 **繁體中文** 撰寫。
+    2. "reason" 欄位必須使用 **繁體中文** 撰寫。
     """
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_str}}]}],
@@ -174,20 +175,28 @@ def analyze_image_with_gemini(api_key, image, model_name):
     
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        res = None
+        last_error = None
         for i in range(3):
             try:
+                # 移除 timeout，無限等待
                 res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except requests.exceptions.RequestException:
-                pass 
+            except Exception as e:
+                last_error = e
+                print(f"Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
-        # 避免 UnboundLocalError
-        try: return requests.post(url, json=payload)
-        except: raise Exception("連線失敗，請檢查網路。")
+        
+        # 如果還是失敗，嘗試最後一次不帶 try-except，拋出原生錯誤
+        if res is None:
+            try: return requests.post(url, json=payload)
+            except: raise Exception(f"連線失敗 (Network Error)。請檢查網路。詳情: {str(last_error)}")
+        return res
 
     response = _send_request(model_name)
     
+    # 降級邏輯
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
         st.toast(f"⚠️ Pro 模型異常，自動降級...", icon="🔄")
         time.sleep(1)
@@ -213,7 +222,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 ---
+# --- 生成函式 (回歸 v1.4 無限等待) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -240,17 +249,23 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     
     def _send_request(target):
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        res = None
+        last_error = None
         for i in range(3):
             try:
-                # 無限等待
+                # 移除 timeout，無限等待
                 res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except requests.exceptions.RequestException:
-                pass
+            except Exception as e:
+                last_error = e
+                print(f"Gen Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
-        try: return requests.post(url, json=payload)
-        except: raise Exception("連線失敗，請檢查網路。")
+        
+        if res is None:
+            try: return requests.post(url, json=payload)
+            except: raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
+        return res
 
     response = _send_request(model_name)
 
@@ -318,7 +333,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.22 (AI Rec + Marked)")
+    st.caption("v1.23 (Infinite Patience)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
