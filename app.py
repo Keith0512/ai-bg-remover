@@ -1,4 +1,4 @@
-# Version: v2.1 (SDK Decode Fix)
+# Version: v2.2 (Robust JSON Handling)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -200,7 +200,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
         else:
             raise Exception(f"分析失敗: {str(e)}")
 
-# --- 生成函式 (SDK 修復版) ---
+# --- 生成函式 (使用 SDK) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     # 縮圖保護
     processed_product = resize_image_for_api(product_image)
@@ -308,7 +308,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v2.1 (SDK Decode Fix)")
+    st.caption("v2.2 (Robust JSON Handling)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -358,13 +358,22 @@ if uploaded_files:
                     sel_prompt = None
                     if selected_file_name in st.session_state.prompts:
                         prompts = st.session_state.prompts[selected_file_name]
-                        title = st.radio("推薦風格:", [p["title"] for p in prompts])
-                        sel_prompt = next((p for p in prompts if p["title"] == title), None)
-                        if sel_prompt:
-                            st.info(sel_prompt['reason'])
-                            with st.expander("查看 Prompt"): 
-                                st.code(sel_prompt['prompt'])
-                                copy_text_button(sel_prompt['prompt'], f"p_{selected_file_name}")
+                        
+                        # [關鍵修正]：安全過濾，確保資料格式正確
+                        safe_prompts = [p for p in prompts if isinstance(p, dict) and 'title' in p]
+                        
+                        if safe_prompts:
+                            title = st.radio("推薦風格:", [p["title"] for p in safe_prompts])
+                            sel_prompt = next((p for p in safe_prompts if p["title"] == title), None)
+                            if sel_prompt:
+                                # [關鍵修正]：使用 .get() 避免 KeyError
+                                st.info(sel_prompt.get('reason', '(AI 未提供詳細說明)'))
+                                with st.expander("查看 Prompt"): 
+                                    prompt_text = sel_prompt.get('prompt', '')
+                                    st.code(prompt_text)
+                                    copy_text_button(prompt_text, f"p_{selected_file_name}")
+                        else:
+                            st.warning("AI 回傳的分析資料格式異常，請重試。")
 
                 with col_right:
                     if sel_prompt:
