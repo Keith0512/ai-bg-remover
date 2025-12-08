@@ -24,29 +24,57 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 ---
+# --- JS 元件：複製圖片到剪貼簿 (修復版) ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
+    
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;">
-            📋 複製
+        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+            background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
+            padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
+            transition: background 0.2s;
+        ">
+            📋 複製圖片
         </button>
-        <span id="msg_{key_suffix}" style="margin-left: 10px; color: green; font-size: 12px; align-self: center;"></span>
+        <span id="msg_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
     </div>
     <script>
     async function copyImage_{key_suffix}() {{
+        const btn = document.getElementById("btn_{key_suffix}");
+        const msg = document.getElementById("msg_{key_suffix}");
+        
+        btn.style.backgroundColor = "#e0e0e0";
+        msg.innerText = "⏳ 處理中...";
+        msg.style.color = "gray";
+
         try {{
+            if (!navigator.clipboard || !navigator.clipboard.write) {{
+                throw new Error("瀏覽器不支援或非 HTTPS 環境");
+            }}
+
             const response = await fetch("data:image/png;base64,{b64_str}");
             const blob = await response.blob();
-            await navigator.clipboard.write([new ClipboardItem({{[blob.type]: blob}})]);
-            document.getElementById("msg_{key_suffix}").innerText = "✅";
-            setTimeout(() => {{ document.getElementById("msg_{key_suffix}").innerText = ""; }}, 2000);
-        }} catch (err) {{ console.error(err); }}
+            
+            const item = new ClipboardItem({{ "image/png": blob }});
+            await navigator.clipboard.write([item]);
+            
+            msg.innerText = "✅ 已複製！";
+            msg.style.color = "green";
+        }} catch (err) {{
+            console.error("Copy failed:", err);
+            msg.innerText = "❌ 失敗 (請確認權限)";
+            msg.style.color = "red";
+        }} finally {{
+            setTimeout(() => {{ 
+                btn.style.backgroundColor = "#f0f2f6"; 
+                if(msg.innerText.includes("已複製")) msg.innerText = "";
+            }}, 2500);
+        }}
     }}
     </script>
     """
-    components.html(html_code, height=40)
+    components.html(html_code, height=50)
 
 # --- 記憶體優化輔助函式 ---
 def pil_to_bytes(image, format="PNG", quality=95):
@@ -88,17 +116,26 @@ def check_pro_model_access(api_key):
     try: return requests.post(url, json=payload).status_code == 200
     except: return False
 
-# --- 分析函式 (Prompt 優化：移除強制畫質描述) ---
+# --- 分析函式 (修改：新增 AI 推薦場景) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
-    # 這裡只專注於場景構成，不加入 8k/4k 等畫質干擾詞
+    
     prompt = """
     你是一位專業的電商視覺總監。
-    請分析這張已經去背的商品圖片，並構思 4 個能大幅提升轉化率的「高階商品攝影場景」。
+    請分析這張已經去背的商品圖片，並構思 5 個能大幅提升轉化率的「高階商品攝影場景」。
     請回傳一個純 JSON Array (不要 Markdown)，格式如下：
     [ { "title": "風格標題", "prompt": "詳細的英文生圖提示詞...", "reason": "為什麼適合此商品" }, ... ]
-    設計方向：極簡高奢、真實生活感、幾何藝術、自然有機。
-    Prompt 必須是英文，描述光線、材質、氛圍與構圖。
+    
+    設計方向：
+    1. 極簡高奢 (Minimalist High-End)
+    2. 真實生活感 (Authentic Lifestyle)
+    3. 幾何藝術 (Abstract Geometric)
+    4. 自然有機 (Nature & Organic)
+    5. AI 獨家推薦 (AI Recommendation - 由你根據商品特性，自由發揮一個最獨特且賣座的場景)
+    
+    【重要指令】：
+    所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
+    "High resolution, 8k, extreme detail, product photography masterpiece, sharp focus, professional lighting, cinematic composition"
     """
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_str}}]}],
@@ -132,12 +169,18 @@ def analyze_image_with_gemini(api_key, image, model_name):
         if cand.get('finishReason') == 'SAFETY': raise Exception("Safety Block")
         parts = cand.get('content', {}).get('parts', [])
         if not parts: raise Exception("No parts")
-        return json.loads(parts[0]['text'])
+        
+        # 處理可能的 Markdown 格式 ```json ... ```
+        text_content = parts[0]['text']
+        if text_content.startswith("```json"):
+            text_content = text_content.replace("```json", "").replace("```", "")
+            
+        return json.loads(text_content)
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (Prompt 優化：動態加入畫質描述) ---
-def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None, quality_mode="default"):
+# --- 生成函式 ---
+def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
     full_prompt = f"""
@@ -151,13 +194,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # 動態畫質 Prompt 注入邏輯
-    if quality_mode == "4k":
-        # Pro + 4K 選項
-        full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard."
-    else:
-        # Flash 預設 或 Pro + 2K 選項
-        full_prompt += "\nQuality: High resolution, professional studio lighting, detailed texture, photorealistic."
+    full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
     parts.append({"inline_data": {"mime_type": "image/png", "data": product_b64}})
@@ -167,7 +204,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target}:generateContent?key={api_key}"
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
         for i in range(3):
             try:
                 res = requests.post(url, json=payload)
@@ -193,7 +230,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         inline_data = cand.get('content', {}).get('parts', [{}])[0].get('inlineData', {})
         if not inline_data: raise Exception("模型未回傳圖片數據。")
         
-        # 取得原始圖片 (Native Resolution)
         return Image.open(io.BytesIO(base64.b64decode(inline_data.get('data'))))
 
     except Exception as e:
@@ -240,7 +276,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.7 (Dynamic Quality & Upscale Option)")
+    st.caption("v1.9 (AI Creative Mode)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -303,13 +339,8 @@ if uploaded_files:
                         model_options = {FLASH_IMAGE_MODEL: "⚡ Flash (快速)", PRO_IMAGE_MODEL: "🚀 Pro (高畫質)"}
                         selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
                         
-                        quality_mode = "default"
-                        if selected_gen_model_key == PRO_IMAGE_MODEL:
-                            if st.session_state.user_model_tier != "PRO": st.warning("⚠️ Key 可能不支援 Pro，若失敗將自動降級。")
-                            res_mode = st.radio("畫質設定", ["2K (標準)", "4K (超高細節)"], horizontal=True)
-                            if "4K" in res_mode:
-                                quality_mode = "4k"
-                                st.caption("🔍 4K 模式會生成更細緻紋理。")
+                        if selected_gen_model_key == PRO_IMAGE_MODEL and st.session_state.user_model_tier != "PRO":
+                            st.warning("⚠️ 您的 Key 可能僅支援 Flash，若 Pro 失敗將自動降級。")
 
                         extra = st.text_area("自訂額外提示詞", placeholder="例如: Add a human hand...")
                         ref_file = st.file_uploader("參考圖片", type=['png', 'jpg', 'jpeg'])
@@ -320,7 +351,7 @@ if uploaded_files:
                                 with st.spinner("生成中..."):
                                     img = generate_image_with_gemini(
                                         final_api_key, nobg_pil, sel_prompt["prompt"], 
-                                        selected_gen_model_key, extra, ref_img, quality_mode
+                                        selected_gen_model_key, extra, ref_img
                                     )
                                     if selected_file_name not in st.session_state.generated_results:
                                         st.session_state.generated_results[selected_file_name] = []
@@ -333,18 +364,13 @@ if uploaded_files:
                             caption_text = f"Result #{len(st.session_state.generated_results[selected_file_name])-i}"
                             st.image(img, caption=caption_text, use_container_width=True)
                             
-                            # 準備不同尺寸的圖
                             img_native = pil_to_bytes(img, "PNG")
                             img_upscaled = pil_to_bytes(upscale_image(img, 2), "PNG")
                             
-                            # 下載選項 (原生 / 放大)
-                            col_dl1, col_dl2, col_copy = st.columns([1, 1, 1])
-                            with col_dl1:
-                                st.download_button("⬇️ 原圖", img_native, f"gen_{i}_native.png", "image/png", use_container_width=True)
-                            with col_dl2:
-                                st.download_button("🔍 放大(2x)", img_upscaled, f"gen_{i}_upscaled.png", "image/png", use_container_width=True)
-                            with col_copy:
-                                copy_image_button(img_native, f"gen_{selected_file_name}_{i}")
+                            c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 1])
+                            with c_btn1: st.download_button("⬇️ 原圖", img_native, f"gen_{i}_native.png", "image/png", use_container_width=True)
+                            with c_btn2: st.download_button("🔍 放大(2x)", img_upscaled, f"gen_{i}_upscaled.png", "image/png", use_container_width=True)
+                            with c_btn3: copy_image_button(img_native, f"gen_{selected_file_name}_{i}")
                             st.divider()
             else:
                 st.info("👈 請輸入 API Key 以使用 AI 功能")
