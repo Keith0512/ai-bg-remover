@@ -1,4 +1,4 @@
-# Version: v2.5 (UX Enhanced: Re-Analyze, Batch Gen, Multi-Ref)
+# Version: v2.6 (Robust Fix & Copy Button Restoration)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -302,7 +302,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v2.5 (UX Enhanced)")
+    st.caption("v2.6 (Robust Fix & Copy Button Restoration)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -369,13 +369,14 @@ if uploaded_files:
                             title = st.radio("推薦風格:", [p["title"] for p in safe_prompts])
                             sel_prompt = next((p for p in safe_prompts if p["title"] == title), None)
                             if sel_prompt:
-                                st.info(sel_prompt.get('reason', '(AI 未提供詳細說明)'))
-                                # 2. 優化 Prompt 顯示與複製
+                                # [關鍵修復] 使用 .get() 並提供預設值，防止 KeyError
+                                reason_text = sel_prompt.get('reason', '(AI 未提供詳細說明)')
+                                st.info(reason_text)
+                                
+                                # 優化 Prompt 顯示
                                 with st.expander("查看 Prompt (已翻譯)", expanded=False):
                                     prompt_text = sel_prompt.get('prompt', '')
-                                    st.text_area("Prompt", prompt_text, height=100, label_visibility="collapsed")
-                                    # 內建複製功能通常在右上角，這裡保留您的 JS 按鈕作為備用
-                                    st.caption("Tip: 右上角有複製按鈕，或使用下方按鈕")
+                                    st.code(prompt_text, language='text') # 使用內建 Code Block (自帶複製功能)
                         else:
                             st.warning("AI 回傳格式異常，請重試。")
 
