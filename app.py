@@ -24,7 +24,7 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 ---
+# --- JS 元件：複製圖片到剪貼簿 (修復版) ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     
@@ -111,10 +111,10 @@ def image_to_base64(image, max_size=(1024, 1024)):
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload).status_code == 200
+    try: return requests.post(url, json=payload, timeout=10).status_code == 200
     except: return False
 
-# --- 分析函式 (修正變數作用域錯誤 + AI 推薦場景) ---
+# --- 分析函式 (修正錯誤捕捉) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -142,18 +142,22 @@ def analyze_image_with_gemini(api_key, image, model_name):
     
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-        res = None # 初始化變數，防止 UnboundLocalError
+        res = None
+        last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload)
+                # 設定 timeout 避免無限卡住
+                res = requests.post(url, json=payload, timeout=30)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except: 
-                pass
+            except Exception as e:
+                last_error = e
+                print(f"Request attempt {i+1} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception("連線失敗：無法連接到 Google 伺服器。")
+            # 拋出真正的連線錯誤訊息
+            raise Exception(f"連線失敗：無法連接到 Google 伺服器。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -165,7 +169,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     
     if response.status_code != 200:
         if response.status_code == 429: raise Exception("API 配額已達上限 (429)，請稍後再試。")
-        raise Exception(f"API Error: {response.text}")
+        raise Exception(f"API Error ({response.status_code}): {response.text}")
     
     try:
         data = response.json()
@@ -183,7 +187,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (修正變數作用域錯誤 + 強制高畫質) ---
+# --- 生成函式 (修正錯誤捕捉) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -198,7 +202,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # 強制加入最強畫質 Prompt
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
@@ -210,18 +213,20 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     
     def _send_request(target):
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
-        res = None # 初始化變數
+        res = None
+        last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload)
+                res = requests.post(url, json=payload, timeout=45) # 生圖比較慢，timeout 設長一點
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except: 
-                pass
+            except Exception as e:
+                last_error = e
+                print(f"Gen Request attempt {i+1} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception("連線失敗：無法連接到 Google 伺服器。")
+            raise Exception(f"連線失敗：無法連接到 Google 伺服器。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -233,7 +238,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     
     if response.status_code != 200:
         if response.status_code == 429: raise Exception("API 配額已達上限，請稍後再試。")
-        raise Exception(f"API Error: {response.text}")
+        raise Exception(f"API Error ({response.status_code}): {response.text}")
         
     try:
         cand = response.json().get('candidates', [{}])[0]
@@ -287,7 +292,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.10 (Full Features + Bugfix)")
+    st.caption("v1.11 (Network Debug)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
