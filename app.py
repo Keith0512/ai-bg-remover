@@ -111,8 +111,14 @@ def image_to_base64(image, max_size=(1024, 1024)):
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload, timeout=15).status_code == 200 # 驗證超時設為 15s
+    try: return requests.post(url, json=payload, timeout=15).status_code == 200 
     except: return False
+
+# --- API Key 淨化函式 (新增) ---
+def clean_api_key(key):
+    if not key: return ""
+    # 移除前後空白、中間空白、換行符號
+    return key.strip().replace(" ", "").replace("\n", "").replace("\r", "")
 
 # --- 分析函式 (Timeout 延長至 60s) ---
 def analyze_image_with_gemini(api_key, image, model_name):
@@ -146,7 +152,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
         last_error = None
         for i in range(3):
             try:
-                # 關鍵修改：將 Timeout 延長至 60 秒 (原 30 秒)
                 res = requests.post(url, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -156,7 +161,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線逾時或失敗：AI 思考太久或網路不穩。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線逾時或失敗。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -216,7 +221,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         last_error = None
         for i in range(3):
             try:
-                # 關鍵修改：將 Timeout 延長至 90 秒 (原 45 秒)，生圖通常比較慢
                 res = requests.post(url, json=payload, timeout=90)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -226,7 +230,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線逾時：生圖花費時間過長。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線逾時。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -264,8 +268,15 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 # --- 側邊欄 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    user_api_key = st.text_input("Google API Key (選填)", type="password")
+    # 接收使用者的輸入
+    raw_api_key = st.text_input("Google API Key (選填)", type="password")
+    
+    # [關鍵修正]：自動淨化 API Key (移除空格、換行)
+    user_api_key = clean_api_key(raw_api_key)
+    
+    # 如果使用者沒填，嘗試讀取 Secrets
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
+    final_api_key = clean_api_key(final_api_key) # Secrets 讀出來的也要清乾淨
     
     if user_api_key and user_api_key != st.session_state.last_validated_key:
         with st.spinner("驗證 Pro 權限..."):
@@ -292,7 +303,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.12 (Timeout Extended)")
+    st.caption("v1.13 (API Key Sanitizer)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
