@@ -1,16 +1,18 @@
-# Version: v1.29 (Syntax Fix & Memory Saver)
+# Version: v2.0 (Official SDK Edition)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
 import io
-import zipfile
 import time
-import requests
 import json
 import base64
 import gc
 import re
 import streamlit.components.v1 as components
+
+# --- 引入 Google 官方 SDK ---
+from google import genai
+from google.genai import types
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -21,27 +23,28 @@ st.set_page_config(
 )
 
 # --- 常數設定 ---
-DEFAULT_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
-DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+PRO_TEXT_MODEL = "gemini-3-pro-preview"
+PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
+FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
+FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+        <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
             background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
             padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
-            transition: background 0.2s;
         ">
             📋 複製圖片
         </button>
-        <span id="msg_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
+        <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
     </div>
     <script>
     async function copyImage_{key_suffix}() {{
-        const btn = document.getElementById("btn_{key_suffix}");
-        const msg = document.getElementById("msg_{key_suffix}");
+        const btn = document.getElementById("btn_img_{key_suffix}");
+        const msg = document.getElementById("msg_img_{key_suffix}");
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         try {{
@@ -53,6 +56,7 @@ def copy_image_button(image_bytes, key_suffix):
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
+            console.error(err);
             msg.innerText = "❌ 失敗";
             msg.style.color = "red";
         }} finally {{
@@ -120,56 +124,35 @@ def upscale_image(image, scale_factor=2):
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
-def image_to_base64(image, max_size=(1024, 1024)):
-    # 這裡的縮圖是為了 Gemini API 省錢
+# --- 圖片縮小保護 (SDK 雖然方便，但為了省錢還是要縮) ---
+def resize_image_for_api(image, max_size=(1024, 1024)):
     img_copy = image.copy()
     img_copy.thumbnail(max_size, Image.Resampling.LANCZOS)
-    buffered = io.BytesIO()
-    if img_copy.mode == 'RGBA':
-        img_copy.save(buffered, format="PNG")
-    else:
-        img_copy = img_copy.convert('RGB')
-        img_copy.save(buffered, format="JPEG", quality=85)
-    return base64.b64encode(buffered.getvalue()).decode()
+    return img_copy
 
-# --- 核心功能：API Key 強力淨化 ---
+# --- API Key 淨化 ---
 def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 新增功能：動態抓取可用模型 ---
-@st.cache_data(ttl=3600)
-def fetch_available_models(api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+# --- 核心功能：驗證 API Key (使用 SDK) ---
+def check_pro_model_access(api_key):
     try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            models = response.json().get('models', [])
-            
-            text_models = [
-                m['name'].replace('models/', '') 
-                for m in models 
-                if 'generateContent' in m.get('supportedGenerationMethods', []) 
-                and 'gemini' in m['name']
-            ]
-            
-            image_models = [
-                m['name'].replace('models/', '') 
-                for m in models 
-                if 'generateContent' in m.get('supportedGenerationMethods', [])
-                and ('image' in m['name'] or 'vision' in m['name'] or 'gemini' in m['name'])
-            ]
-            
-            text_models.sort(reverse=True)
-            image_models.sort(reverse=True)
-            return text_models, image_models
-    except:
-        pass
-    return [], []
+        client = genai.Client(api_key=api_key)
+        # 發送一個極小的測試請求
+        response = client.models.generate_content(
+            model=PRO_TEXT_MODEL,
+            contents="Ping",
+            config=types.GenerateContentConfig(max_output_tokens=1)
+        )
+        return response is not None
+    except Exception as e:
+        return False
 
-# --- 分析函式 (修復網址寫法錯誤) ---
+# --- 分析函式 (使用 SDK) ---
 def analyze_image_with_gemini(api_key, image, model_name):
-    base64_str = image_to_base64(image)
+    # 縮圖保護
+    processed_img = resize_image_for_api(image)
     
     prompt = """
     你是一位專業的電商視覺總監。
@@ -189,62 +172,38 @@ def analyze_image_with_gemini(api_key, image, model_name):
     "High resolution, 8k, extreme detail, product photography masterpiece, sharp focus, professional lighting, cinematic composition"
     2. "reason" 欄位必須使用 **繁體中文** 撰寫。
     """
-    payload = {
-        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_str}}]}],
-        "generation_config": {"response_mime_type": "application/json"}
-    }
     
-    def _send_request(target_model):
-        # [✅ 修正點] 確保這是純字串，沒有 Markdown 語法
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-        params = {"key": api_key} # 使用 params 傳遞 Key 最安全
-        
-        res = None
-        last_error = None
-        for i in range(3):
-            try:
-                res = requests.post(url, params=params, json=payload)
-                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
-                    return res
-            except Exception as e:
-                last_error = e
-                print(f"Error attempt {i}: {e}")
-            time.sleep(2 ** (i + 1))
-        
-        if res is None:
-            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
-        return res
-
-    response = _send_request(model_name)
+    client = genai.Client(api_key=api_key)
     
-    if response.status_code != 200:
-        if model_name != DEFAULT_TEXT_MODEL:
-             st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
-             time.sleep(1)
-             return analyze_image_with_gemini(api_key, image, DEFAULT_TEXT_MODEL)
-
-        if response.status_code == 429: raise Exception("API 配額已達上限 (429)，請稍後再試。")
-        raise Exception(f"API Error ({response.status_code}): {response.text}")
-    
+    # 自動降級邏輯
     try:
-        data = response.json()
-        if 'candidates' not in data: raise Exception("No candidates")
-        cand = data['candidates'][0]
-        if cand.get('finishReason') == 'SAFETY': raise Exception("Safety Block")
-        parts = cand.get('content', {}).get('parts', [])
-        if not parts: raise Exception("No parts")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[prompt, processed_img],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        return json.loads(response.text)
         
-        text_content = parts[0]['text']
-        if text_content.startswith("```json"):
-            text_content = text_content.replace("```json", "").replace("```", "")
-            
-        return json.loads(text_content)
     except Exception as e:
-        raise Exception(f"解析失敗: {str(e)}")
+        # 如果是 Pro 模型失敗，嘗試切換到 Flash
+        if model_name == PRO_TEXT_MODEL:
+            st.toast(f"⚠️ Pro 模型異常 ({str(e)})，自動降級...", icon="🔄")
+            try:
+                response = client.models.generate_content(
+                    model=FLASH_TEXT_MODEL,
+                    contents=[prompt, processed_img],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                return json.loads(response.text)
+            except Exception as e2:
+                raise Exception(f"分析失敗 (Flash 也失敗): {str(e2)}")
+        else:
+            raise Exception(f"分析失敗: {str(e)}")
 
-# --- 生成函式 (修復網址寫法錯誤) ---
+# --- 生成函式 (使用 SDK) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
-    product_b64 = image_to_base64(product_image)
+    # 縮圖保護
+    processed_product = resize_image_for_api(product_image)
     
     full_prompt = f"""
     Professional product photography masterpiece.
@@ -257,57 +216,49 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
+    # 強制全開 8K 畫質
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
-    parts = [{"text": full_prompt}]
-    parts.append({"inline_data": {"mime_type": "image/png", "data": product_b64}})
+    # 準備內容：Prompt + 商品圖 + (選填)參考圖
+    contents = [full_prompt, processed_product]
     if ref_image:
-        parts.append({"inline_data": {"mime_type": "image/png", "data": image_to_base64(ref_image)}})
+        contents.append(resize_image_for_api(ref_image))
 
-    payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
+    client = genai.Client(api_key=api_key)
     
-    def _send_request(target):
-        # [✅ 修正點] 純字串網址
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
-        params = {"key": api_key}
-        
-        res = None
-        last_error = None
-        for i in range(3):
-            try:
-                res = requests.post(url, params=params, json=payload)
-                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
-                    return res
-            except Exception as e:
-                last_error = e
-                print(f"Gen Error attempt {i}: {e}")
-            time.sleep(2 ** (i + 1))
-        
-        if res is None:
-            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
-        return res
-
-    response = _send_request(model_name)
-
-    if response.status_code != 200:
-        if model_name != DEFAULT_IMAGE_MODEL:
-            st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
-            time.sleep(1)
-            return generate_image_with_gemini(api_key, product_image, base_prompt, DEFAULT_IMAGE_MODEL, user_extra_prompt, ref_image)
-
-        if response.status_code == 429: raise Exception("API 配額已達上限，請稍後再試。")
-        raise Exception(f"API Error ({response.status_code}): {response.text}")
-        
+    # 自動降級邏輯
     try:
-        cand = response.json().get('candidates', [{}])[0]
-        if cand.get('finishReason') == 'SAFETY': raise Exception("圖片生成因安全政策被攔截。")
-        inline_data = cand.get('content', {}).get('parts', [{}])[0].get('inlineData', {})
-        if not inline_data: raise Exception("模型未回傳圖片數據。")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(response_modalities=["IMAGE"])
+        )
         
-        return Image.open(io.BytesIO(base64.b64decode(inline_data.get('data'))))
+        # 從回應中提取圖片
+        for part in response.candidates[0].content.parts:
+            if part.inline_data:
+                return Image.open(io.BytesIO(base64.b64decode(part.inline_data.data)))
+        
+        raise Exception("模型未回傳圖片數據")
 
     except Exception as e:
-        raise Exception(f"生成失敗: {str(e)}")
+        # 如果是 Pro 模型失敗，嘗試切換到 Flash
+        if model_name == PRO_IMAGE_MODEL:
+            st.toast(f"⚠️ Pro 模型異常，自動切換至 Flash...", icon="🔄")
+            try:
+                response = client.models.generate_content(
+                    model=FLASH_IMAGE_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(response_modalities=["IMAGE"])
+                )
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data:
+                        return Image.open(io.BytesIO(base64.b64decode(part.inline_data.data)))
+                raise Exception("Flash 模型也未回傳圖片")
+            except Exception as e2:
+                raise Exception(f"生成失敗 (雙重失敗): {str(e2)}")
+        else:
+            raise Exception(f"生成失敗: {str(e)}")
 
 # --- Session 初始化 ---
 @st.cache_resource
@@ -316,7 +267,8 @@ def get_model_session(name): return new_session(name)
 if 'processed_images' not in st.session_state: st.session_state.processed_images = {}
 if 'prompts' not in st.session_state: st.session_state.prompts = {}
 if 'generated_results' not in st.session_state: st.session_state.generated_results = {}
-if 'fetched_models' not in st.session_state: st.session_state.fetched_models = ([], [])
+if 'last_validated_key' not in st.session_state: st.session_state.last_validated_key = None
+if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier = "FLASH"
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -327,33 +279,32 @@ with st.sidebar:
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
     final_api_key = clean_api_key(final_api_key)
     
-    # 預設選項
-    text_model_options = [DEFAULT_TEXT_MODEL]
-    image_model_options = [DEFAULT_IMAGE_MODEL]
+    if user_api_key and user_api_key != st.session_state.last_validated_key:
+        with st.spinner("驗證 Pro 權限..."):
+            if check_pro_model_access(user_api_key):
+                st.session_state.user_model_tier = "PRO"
+                st.toast("✅ Pro 權限已啟用", icon="🚀")
+            else:
+                st.session_state.user_model_tier = "FLASH"
+                st.error("⚠️ 無法啟用 Pro (未綁定帳單)，降級為 Flash")
+            st.session_state.last_validated_key = user_api_key
+    elif not user_api_key:
+        st.session_state.user_model_tier = "FLASH"
+        st.session_state.last_validated_key = None
+
+    current_text_model = PRO_TEXT_MODEL if st.session_state.user_model_tier == "PRO" and user_api_key else FLASH_TEXT_MODEL
     
-    # 動態抓取模型
-    if final_api_key:
-        if st.button("🔄 更新模型列表"):
-            with st.spinner("正在查詢..."):
-                t_list, i_list = fetch_available_models(final_api_key)
-                if t_list:
-                    st.session_state.fetched_models = (t_list, i_list)
-                    st.success(f"已更新！")
-    
-    if st.session_state.fetched_models[0]:
-        text_model_options = st.session_state.fetched_models[0]
-        if DEFAULT_TEXT_MODEL not in text_model_options: text_model_options.append(DEFAULT_TEXT_MODEL)
-    if st.session_state.fetched_models[1]:
-        image_model_options = st.session_state.fetched_models[1]
-        if DEFAULT_IMAGE_MODEL not in image_model_options: image_model_options.append(DEFAULT_IMAGE_MODEL)
+    if st.session_state.user_model_tier == "PRO" and user_api_key:
+        st.success(f"🚀 **Pro Mode** (Vision: {PRO_TEXT_MODEL})")
+    else:
+        st.info(f"⚡ **Flash Mode** (Vision: {FLASH_TEXT_MODEL})")
 
     st.divider()
-    # [關鍵修正]：預設模型改為 u2netp (最輕量)，防止 Streamlit Cloud 記憶體爆掉
-    model_labels = {"u2netp": "u2netp (快速省記憶體-推薦)", "isnet-general-use": "isnet (高細節)", "u2net": "u2net (標準)"}
+    model_labels = {"u2netp": "u2netp (快速-推薦)", "isnet-general-use": "isnet (高細節)", "u2net": "u2net (標準)"}
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.29 (Syntax Fix & Memory Saver)")
+    st.caption("v2.0 (Official SDK Edition)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -362,18 +313,15 @@ if uploaded_files:
     for file in uploaded_files:
         if file.name not in st.session_state.processed_images:
             with st.spinner(f"正在去背: {file.name}..."):
-                # [關鍵修正]：讀取後立刻縮圖，防止記憶體爆炸
                 img = Image.open(file)
-                # 這裡的縮圖是為了保護 Streamlit Server 的 RAM
-                if max(img.size) > 1024: img.thumbnail((1024, 1024)) 
-                
+                if max(img.size) > 1024: img.thumbnail((1024, 1024))
                 out = remove(img, session=session)
                 st.session_state.processed_images[file.name] = {
                     "original_data": pil_to_bytes(img, "JPEG"),
                     "nobg_data": pil_to_bytes(out, "PNG")
                 }
                 del img, out
-                gc.collect() # 強制垃圾回收
+                gc.collect()
 
     st.divider()
     if st.session_state.processed_images:
@@ -397,13 +345,10 @@ if uploaded_files:
                 col_left, col_right = st.columns([1, 2])
                 
                 with col_left:
-                    # 選擇分析模型
-                    selected_text_model = st.selectbox("👁️ 分析模型", text_model_options, index=0)
-                    
                     if st.button("🪄 1. 分析場景 (Analyze)", type="primary", use_container_width=True):
                         try:
                             with st.spinner(f"分析中..."):
-                                st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, selected_text_model)
+                                st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, current_text_model)
                         except Exception as e: st.error(str(e))
 
                     sel_prompt = None
@@ -421,31 +366,30 @@ if uploaded_files:
                     if sel_prompt:
                         st.markdown("#### 🛠️ 2. 生成設定")
                         
-                        # 選擇生圖模型
-                        selected_gen_model = st.selectbox("🎨 生圖模型", image_model_options, index=0)
+                        model_options = {PRO_IMAGE_MODEL: "🚀 Pro (高畫質/預設)", FLASH_IMAGE_MODEL: "⚡ Flash (快速)"}
+                        selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
+                        
+                        if selected_gen_model_key == PRO_IMAGE_MODEL and st.session_state.user_model_tier != "PRO":
+                            st.warning("⚠️ 您的 Key 可能僅支援 Flash，若 Pro 失敗將自動降級。")
 
                         extra = st.text_area("自訂額外提示詞", placeholder="例如: Add a human hand...")
                         ref_file = st.file_uploader("參考圖片", type=['png', 'jpg', 'jpeg'])
                         
-                        # [關鍵修正 2]：參考圖讀取時縮圖
                         ref_img = None
                         if ref_file:
                             ref_img = Image.open(ref_file)
-                            if max(ref_img.size) > 1024: 
-                                ref_img.thumbnail((1024, 1024))
+                            if max(ref_img.size) > 1024: ref_img.thumbnail((1024, 1024))
                         
                         if st.button(f"🎨 3. 開始生成：{sel_prompt['title']}", type="primary", use_container_width=True):
                             try:
                                 with st.spinner("生成中..."):
                                     img = generate_image_with_gemini(
                                         final_api_key, nobg_pil, sel_prompt["prompt"], 
-                                        selected_gen_model, extra, ref_img
+                                        selected_gen_model_key, extra, ref_img
                                     )
                                     if selected_file_name not in st.session_state.generated_results:
                                         st.session_state.generated_results[selected_file_name] = []
                                     st.session_state.generated_results[selected_file_name].insert(0, img)
-                                    
-                                    # [關鍵修正 3]：生成後釋放 RAM
                                     gc.collect()
                             except Exception as e: st.error(str(e))
                     
@@ -461,4 +405,7 @@ if uploaded_files:
                             c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 1])
                             with c_btn1: st.download_button("⬇️ 原圖", img_native, f"gen_{i}_native.png", "image/png", use_container_width=True)
                             with c_btn2: st.download_button("🔍 放大(2x)", img_upscaled, f"gen_{i}_upscaled.png", "image/png", use_container_width=True)
-               
+                            with c_btn3: copy_image_button(img_native, f"gen_{selected_file_name}_{i}")
+                            st.divider()
+            else:
+                st.info("👈 請輸入 API Key 以使用 AI 功能")
