@@ -25,23 +25,23 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 (保留好用功能) ---
+# --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+        <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
             background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
             padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
         ">
             📋 複製圖片
         </button>
-        <span id="msg_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
+        <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
     </div>
     <script>
     async function copyImage_{key_suffix}() {{
-        const btn = document.getElementById("btn_{key_suffix}");
-        const msg = document.getElementById("msg_{key_suffix}");
+        const btn = document.getElementById("btn_img_{key_suffix}");
+        const msg = document.getElementById("msg_img_{key_suffix}");
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         try {{
@@ -53,6 +53,7 @@ def copy_image_button(image_bytes, key_suffix):
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
+            console.error(err);
             msg.innerText = "❌ 失敗";
             msg.style.color = "red";
         }} finally {{
@@ -65,6 +66,43 @@ def copy_image_button(image_bytes, key_suffix):
     </script>
     """
     components.html(html_code, height=50)
+
+# --- JS 元件：複製文字到剪貼簿 (新增功能) ---
+def copy_text_button(text, key_suffix):
+    # 處理文字中的特殊字元，避免 JS 錯誤
+    safe_text = json.dumps(text)
+    
+    html_code = f"""
+    <div style="margin-top: 5px;">
+        <button id="btn_txt_{key_suffix}" onclick="copyText_{key_suffix}()" style="
+            background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
+            padding: 2px 8px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 5px;
+        ">
+            📋 複製 Prompt
+        </button>
+        <span id="msg_txt_{key_suffix}" style="margin-left: 5px; font-size: 11px;"></span>
+    </div>
+    <script>
+    async function copyText_{key_suffix}() {{
+        const btn = document.getElementById("btn_txt_{key_suffix}");
+        const msg = document.getElementById("msg_txt_{key_suffix}");
+        const textToCopy = {safe_text};
+        
+        try {{
+            await navigator.clipboard.writeText(textToCopy);
+            msg.innerText = "✅ Copied!";
+            msg.style.color = "green";
+        }} catch (err) {{
+            console.error(err);
+            msg.innerText = "❌ Failed";
+            msg.style.color = "red";
+        }} finally {{
+            setTimeout(() => {{ msg.innerText = ""; }}, 2000);
+        }}
+    }}
+    </script>
+    """
+    components.html(html_code, height=40)
 
 # --- 記憶體優化輔助函式 ---
 def pil_to_bytes(image, format="PNG", quality=95):
@@ -82,7 +120,7 @@ def pil_to_bytes(image, format="PNG", quality=95):
 def bytes_to_pil(image_bytes):
     return Image.open(io.BytesIO(image_bytes))
 
-# --- 高品質放大函式 (保留好用功能) ---
+# --- 高品質放大函式 (Upscaling) ---
 def upscale_image(image, scale_factor=2):
     """使用 Lanczos 演算法進行高品質放大"""
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
@@ -99,60 +137,63 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- API Key 淨化 (簡單版) ---
+# --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
-    return key.strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (回歸 v1.4 的簡單邏輯) ---
+# --- 核心功能：驗證 API Key ---
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try:
-        # 完全移除 timeout 參數，模仿 v1.4
-        return requests.post(url, json=payload).status_code == 200 
+    try: 
+        return requests.post(url, json=payload, timeout=10).status_code == 200 
     except: return False
 
-# --- 分析函式 (採用 v1.4 網路架構 + v1.8 強制 Prompt) ---
+# --- 分析函式 (新增 AI 推薦 + 中文 Reason) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
     prompt = """
     你是一位專業的電商視覺總監。
-    請分析這張已經去背的商品圖片，並構思 4 個能大幅提升轉化率的「高階商品攝影場景」。
+    請分析這張已經去背的商品圖片，並構思 5 個能大幅提升轉化率的「高階商品攝影場景」。
     請回傳一個純 JSON Array (不要 Markdown)，格式如下：
-    [ { "title": "風格標題", "prompt": "詳細的英文生圖提示詞...", "reason": "為什麼適合此商品" }, ... ]
+    [ { "title": "風格標題", "prompt": "詳細的英文生圖提示詞...", "reason": "使用繁體中文解釋為什麼適合此商品" }, ... ]
     
     設計方向：
     1. 極簡高奢 (Minimalist High-End)
     2. 真實生活感 (Authentic Lifestyle)
     3. 幾何藝術 (Abstract Geometric)
     4. 自然有機 (Nature & Organic)
+    5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景)
     
     【重要指令】：
-    所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
+    1. 所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
     "High resolution, 8k, extreme detail, product photography masterpiece, sharp focus, professional lighting, cinematic composition"
+    2. "reason" 欄位必須使用 **繁體中文** 撰寫。
     """
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_str}}]}],
         "generation_config": {"response_mime_type": "application/json"}
     }
     
-    # [關鍵復原]：這段完全照搬 v1.4 的寫法
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        res = None
+        last_error = None
         for i in range(3):
             try:
-                # 這裡不設 timeout，跟 v1.4 一樣
-                res = requests.post(url, json=payload)
+                res = requests.post(url, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except requests.exceptions.RequestException:
-                pass 
+            except Exception as e:
+                last_error = e
+                print(f"Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
-        # 這裡為了避免 UnboundLocalError，我們補強一點點
-        try: return requests.post(url, json=payload)
-        except: raise Exception("連線失敗，請檢查網路。")
+        
+        if res is None:
+            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
+        return res
 
     response = _send_request(model_name)
     
@@ -163,11 +204,10 @@ def analyze_image_with_gemini(api_key, image, model_name):
         response = _send_request(FLASH_TEXT_MODEL)
     
     if response.status_code != 200:
-        if response.status_code == 429: raise Exception("API 配額已達上限 (429)。")
+        if response.status_code == 429: raise Exception("API 配額已達上限 (429)，請稍後再試。")
         raise Exception(f"API Error ({response.status_code}): {response.text}")
     
     try:
-        # 解析邏輯維持 v1.8 的強固版
         data = response.json()
         if 'candidates' not in data: raise Exception("No candidates")
         cand = data['candidates'][0]
@@ -183,7 +223,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (採用 v1.4 網路架構 + v1.8 畫質功能) ---
+# --- 生成函式 ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -198,7 +238,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # v1.8 特色：強制全開 8K 畫質
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
@@ -208,21 +247,23 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
-    # [關鍵復原]：這段完全照搬 v1.4 的寫法
     def _send_request(target):
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        res = None
+        last_error = None
         for i in range(3):
             try:
-                # 不設 timeout
-                res = requests.post(url, json=payload)
+                res = requests.post(url, json=payload, timeout=180) # 180s
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
-            except requests.exceptions.RequestException:
-                pass
+            except Exception as e:
+                last_error = e
+                print(f"Gen Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
-        # 最後一搏
-        try: return requests.post(url, json=payload)
-        except: raise Exception("連線失敗，請檢查網路。")
+        
+        if res is None:
+            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
+        return res
 
     response = _send_request(model_name)
 
@@ -232,7 +273,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         response = _send_request(FLASH_IMAGE_MODEL)
     
     if response.status_code != 200:
-        if response.status_code == 429: raise Exception("API 配額已達上限。")
+        if response.status_code == 429: raise Exception("API 配額已達上限，請稍後再試。")
         raise Exception(f"API Error ({response.status_code}): {response.text}")
         
     try:
@@ -290,7 +331,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.18 (Best of Both Worlds: v1.4 Logic + v1.8 Features)")
+    st.caption("v1.20 (Default Pro + Prompt Copy + AI Rec)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -344,13 +385,17 @@ if uploaded_files:
                         sel_prompt = next((p for p in prompts if p["title"] == title), None)
                         if sel_prompt:
                             st.info(sel_prompt['reason'])
-                            with st.expander("查看 Prompt"): st.code(sel_prompt['prompt'])
+                            with st.expander("查看 Prompt"): 
+                                st.code(sel_prompt['prompt'])
+                                # 新增：Prompt 複製按鈕
+                                copy_text_button(sel_prompt['prompt'], f"p_{selected_file_name}")
 
                 with col_right:
                     if sel_prompt:
                         st.markdown("#### 🛠️ 2. 生成設定")
                         
-                        model_options = {FLASH_IMAGE_MODEL: "⚡ Flash (快速)", PRO_IMAGE_MODEL: "🚀 Pro (高畫質)"}
+                        # 模型選擇器：預設 Pro (透過 key 順序或 index)
+                        model_options = {PRO_IMAGE_MODEL: "🚀 Pro (高畫質/預設)", FLASH_IMAGE_MODEL: "⚡ Flash (快速)"}
                         selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
                         
                         if selected_gen_model_key == PRO_IMAGE_MODEL and st.session_state.user_model_tier != "PRO":
