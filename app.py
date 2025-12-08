@@ -1,4 +1,4 @@
-# Version: v1.27 (Model Name Fix)
+# Version: v1.28 (Dynamic Model Fetch)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -20,11 +20,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 常數設定 ---
-PRO_TEXT_MODEL = "gemini-3-pro"
-PRO_IMAGE_MODEL = "gemini-3-pro-image"
-FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
-FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+# --- 預設常數 (當無法取得動態列表時的備案) ---
+DEFAULT_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
+DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
@@ -139,15 +137,45 @@ def clean_api_key(key):
     # 只保留英數字、底線、減號，徹底移除隱形字元
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (回歸 v1.4 風格：字串拼接) ---
-def check_pro_model_access(api_key):
-    # 直接在 URL 帶上 Key (v1.4 方式，避開 Adapter Error)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
-    payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: 
-        # 無限等待，不使用 params
-        return requests.post(url, json=payload).status_code == 200 
-    except: return False
+# --- 新增功能：動態抓取可用模型 ---
+@st.cache_data(ttl=3600) # 快取 1 小時
+def fetch_available_models(api_key):
+    """向 Google 查詢此 API Key 可用的所有模型列表"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            
+            # 1. 篩選分析用模型 (Gemini, 支援 generateContent)
+            # 排除掉 embedding, aqa 等非生成模型
+            text_models = [
+                m['name'].replace('models/', '') 
+                for m in models 
+                if 'generateContent' in m.get('supportedGenerationMethods', []) 
+                and 'gemini' in m['name']
+            ]
+            
+            # 2. 篩選生圖模型 (通常包含 image 關鍵字，或者特定的 Pro Vision)
+            # 由於 API 列表屬性不一定有 image generation 標籤，我們用關鍵字寬鬆篩選
+            # 優先保留使用者已知的好用模型
+            image_models = [
+                m['name'].replace('models/', '') 
+                for m in models 
+                if 'generateContent' in m.get('supportedGenerationMethods', [])
+                and ('image' in m['name'] or 'vision' in m['name'] or 'gemini' in m['name'])
+            ]
+            
+            # 排序：讓越新的模型 (版本號大) 排前面
+            text_models.sort(reverse=True)
+            image_models.sort(reverse=True)
+            
+            return text_models, image_models
+    except:
+        pass
+    
+    # 若失敗，回傳預設空清單
+    return [], []
 
 # --- 分析函式 (回歸 v1.4 風格 + 5種場景) ---
 def analyze_image_with_gemini(api_key, image, model_name):
@@ -177,13 +205,11 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        # 使用 v1.4 的 URL 拼接方式
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 無限等待
                 res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -193,20 +219,19 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            # 遮蔽 Key 後顯示錯誤
             safe_url = url.split("?")[0]
             raise Exception(f"連線失敗 (Network Error)。網址: {safe_url}, 錯誤: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
     
-    # 降級邏輯
-    if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
-        st.toast(f"⚠️ Pro 模型異常，自動降級...", icon="🔄")
-        time.sleep(1)
-        response = _send_request(FLASH_TEXT_MODEL)
-    
     if response.status_code != 200:
+        # 自動降級嘗試 (如果是用 Pro 失敗，試試預設)
+        if model_name != DEFAULT_TEXT_MODEL:
+             st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
+             time.sleep(1)
+             return analyze_image_with_gemini(api_key, image, DEFAULT_TEXT_MODEL)
+
         if response.status_code == 429: raise Exception("API 配額已達上限 (429)，請稍後再試。")
         raise Exception(f"API Error ({response.status_code}): {response.text}")
     
@@ -257,7 +282,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         last_error = None
         for i in range(3):
             try:
-                # 無限等待
                 res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -272,12 +296,13 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
 
     response = _send_request(model_name)
 
-    if response.status_code != 200 and "pro" in model_name:
-        st.toast(f"⚠️ Pro 模型異常，自動切換至 Flash...", icon="🔄")
-        time.sleep(1)
-        response = _send_request(FLASH_IMAGE_MODEL)
-    
     if response.status_code != 200:
+        # 自動降級
+        if model_name != DEFAULT_IMAGE_MODEL:
+            st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
+            time.sleep(1)
+            return generate_image_with_gemini(api_key, product_image, base_prompt, DEFAULT_IMAGE_MODEL, user_extra_prompt, ref_image)
+
         if response.status_code == 429: raise Exception("API 配額已達上限，請稍後再試。")
         raise Exception(f"API Error ({response.status_code}): {response.text}")
         
@@ -299,8 +324,7 @@ def get_model_session(name): return new_session(name)
 if 'processed_images' not in st.session_state: st.session_state.processed_images = {}
 if 'prompts' not in st.session_state: st.session_state.prompts = {}
 if 'generated_results' not in st.session_state: st.session_state.generated_results = {}
-if 'last_validated_key' not in st.session_state: st.session_state.last_validated_key = None
-if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier = "FLASH"
+if 'fetched_models' not in st.session_state: st.session_state.fetched_models = ([], []) # (text_list, image_list)
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -311,32 +335,37 @@ with st.sidebar:
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
     final_api_key = clean_api_key(final_api_key)
     
-    if user_api_key and user_api_key != st.session_state.last_validated_key:
-        with st.spinner("驗證 Pro 權限..."):
-            if check_pro_model_access(user_api_key):
-                st.session_state.user_model_tier = "PRO"
-                st.toast("✅ Pro 權限已啟用", icon="🚀")
-            else:
-                st.session_state.user_model_tier = "FLASH"
-                st.error("⚠️ 無法啟用 Pro (未綁定帳單)，降級為 Flash")
-            st.session_state.last_validated_key = user_api_key
-    elif not user_api_key:
-        st.session_state.user_model_tier = "FLASH"
-        st.session_state.last_validated_key = None
-
-    current_text_model = PRO_TEXT_MODEL if st.session_state.user_model_tier == "PRO" and user_api_key else FLASH_TEXT_MODEL
+    # 模型列表 (動態抓取 or 使用預設)
+    text_model_options = [DEFAULT_TEXT_MODEL]
+    image_model_options = [DEFAULT_IMAGE_MODEL]
     
-    if st.session_state.user_model_tier == "PRO" and user_api_key:
-        st.success(f"🚀 **Pro Mode** (Vision: {PRO_TEXT_MODEL})")
-    else:
-        st.info(f"⚡ **Flash Mode** (Vision: {FLASH_TEXT_MODEL})")
+    # 若有 Key，嘗試抓取模型清單
+    if final_api_key:
+        if st.button("🔄 更新可用模型列表"):
+            with st.spinner("正在向 Google 查詢您的可用模型..."):
+                t_list, i_list = fetch_available_models(final_api_key)
+                if t_list:
+                    st.session_state.fetched_models = (t_list, i_list)
+                    st.success(f"找到 {len(t_list)} 個文字模型, {len(i_list)} 個影像模型")
+                else:
+                    st.warning("無法取得模型列表，將使用預設值。")
+    
+    # 載入 Session 中的模型列表 (如果有)
+    if st.session_state.fetched_models[0]:
+        text_model_options = st.session_state.fetched_models[0]
+        # 如果抓到的清單包含預設值，確保它在清單中
+        if DEFAULT_TEXT_MODEL not in text_model_options: text_model_options.append(DEFAULT_TEXT_MODEL)
+    
+    if st.session_state.fetched_models[1]:
+        image_model_options = st.session_state.fetched_models[1]
+        if DEFAULT_IMAGE_MODEL not in image_model_options: image_model_options.append(DEFAULT_IMAGE_MODEL)
 
     st.divider()
     model_labels = {"isnet-general-use": "isnet (推薦)", "u2net": "u2net (標準)", "u2netp": "u2netp (快速)"}
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.27 (Model Name Fix)")
+    st.caption("v1.28 (Dynamic Model Fetch)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -377,10 +406,13 @@ if uploaded_files:
                 col_left, col_right = st.columns([1, 2])
                 
                 with col_left:
+                    # 選擇分析模型
+                    selected_text_model = st.selectbox("👁️ 分析模型", text_model_options, index=0)
+                    
                     if st.button("🪄 1. 分析場景 (Analyze)", type="primary", use_container_width=True):
                         try:
-                            with st.spinner(f"分析中..."):
-                                st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, current_text_model)
+                            with st.spinner(f"分析中 ({selected_text_model})..."):
+                                st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, selected_text_model)
                         except Exception as e: st.error(str(e))
 
                     sel_prompt = None
@@ -398,12 +430,8 @@ if uploaded_files:
                     if sel_prompt:
                         st.markdown("#### 🛠️ 2. 生成設定")
                         
-                        # 模型選擇器：預設 Pro (透過 key 順序或 index)
-                        model_options = {PRO_IMAGE_MODEL: "🚀 Pro (高畫質/預設)", FLASH_IMAGE_MODEL: "⚡ Flash (快速)"}
-                        selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
-                        
-                        if selected_gen_model_key == PRO_IMAGE_MODEL and st.session_state.user_model_tier != "PRO":
-                            st.warning("⚠️ 您的 Key 可能僅支援 Flash，若 Pro 失敗將自動降級。")
+                        # 選擇生圖模型
+                        selected_gen_model = st.selectbox("🎨 生圖模型", image_model_options, index=0)
 
                         extra = st.text_area("自訂額外提示詞", placeholder="例如: Add a human hand...")
                         ref_file = st.file_uploader("參考圖片", type=['png', 'jpg', 'jpeg'])
@@ -411,10 +439,10 @@ if uploaded_files:
                         
                         if st.button(f"🎨 3. 開始生成：{sel_prompt['title']}", type="primary", use_container_width=True):
                             try:
-                                with st.spinner("生成中..."):
+                                with st.spinner(f"生成中 ({selected_gen_model})..."):
                                     img = generate_image_with_gemini(
                                         final_api_key, nobg_pil, sel_prompt["prompt"], 
-                                        selected_gen_model_key, extra, ref_img
+                                        selected_gen_model, extra, ref_img
                                     )
                                     if selected_file_name not in st.session_state.generated_results:
                                         st.session_state.generated_results[selected_file_name] = []
