@@ -25,6 +25,16 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
+# --- 關鍵修復：建立乾淨的連線 Session ---
+def get_clean_session():
+    """
+    建立一個強制忽略系統 Proxy 設定的 Session。
+    解決 'No connection adapters' 錯誤的終極手段。
+    """
+    session = requests.Session()
+    session.trust_env = False  # 關鍵！忽略系統環境變數中的 Proxy 設定
+    return session
+
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
@@ -137,22 +147,19 @@ def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (使用 Params 傳遞) ---
+# --- 核心功能：驗證 API Key (Bypass Proxy) ---
 def check_pro_model_access(api_key):
-    # [修正點] 不要在 URL 後面直接加 ?key=...，這是錯誤根源
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent"
-    
-    # [修正點] 使用 params 參數傳遞 Key，requests 會自動處理所有格式問題
     params = {"key": api_key}
-    
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
     
     try: 
+        session = get_clean_session() # 使用乾淨的 Session
         # 無限等待，使用 params
-        return requests.post(url, params=params, json=payload).status_code == 200 
+        return session.post(url, params=params, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (使用 Params 傳遞 Key，解決連線錯誤) ---
+# --- 分析函式 (Bypass Proxy + Params) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -180,17 +187,18 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        # [修正點] 這裡只放純網址
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-        # [修正點] 參數放這裡
         query_params = {"key": api_key}
+        
+        # 使用乾淨的 Session
+        session = get_clean_session()
         
         res = None
         last_error = None
         for i in range(3):
             try:
-                # [修正點] 傳入 params
-                res = requests.post(url, params=query_params, json=payload)
+                # 無限等待
+                res = session.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -200,8 +208,8 @@ def analyze_image_with_gemini(api_key, image, model_name):
         
         if res is None:
             # 這裡不使用 timeout，保持無限等待，但會拋出連線錯誤詳情
-            try: return requests.post(url, params=query_params, json=payload)
-            except: raise Exception(f"連線失敗 (Network Error)。請檢查網路或 API Key。詳情: {str(last_error)}")
+            try: return session.post(url, params=query_params, json=payload)
+            except: raise Exception(f"連線失敗 (Proxy/Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -232,7 +240,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (使用 Params 傳遞 Key) ---
+# --- 生成函式 (Bypass Proxy + Params) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -258,16 +266,16 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        # [修正點] 純網址
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
-        # [修正點] 參數
         query_params = {"key": api_key}
+        
+        session = get_clean_session() # 使用乾淨的 Session
         
         res = None
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, params=query_params, json=payload)
+                res = session.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -276,8 +284,8 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            try: return requests.post(url, params=query_params, json=payload)
-            except: raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
+            try: return session.post(url, params=query_params, json=payload)
+            except: raise Exception(f"連線失敗 (Proxy/Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -346,7 +354,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.24 (Safe URL Construction)")
+    st.caption("v1.25 (Proxy Bypass Edition)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
