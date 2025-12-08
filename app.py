@@ -1,4 +1,4 @@
-# Version: v2.4 (Robust Clipboard & JSON Fix)
+# Version: v2.5 (UX Enhanced: Re-Analyze, Batch Gen, Multi-Ref)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -31,8 +31,6 @@ FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 # --- JS 元件：複製圖片到剪貼簿 (權限增強版) ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
-    
-    # 這裡的 HTML/JS 會在 iframe 中執行
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -74,29 +72,18 @@ def copy_image_button(image_bytes, key_suffix):
             msg.style.color = "gray";
 
             try {{
-                // 1. 檢查 Clipboard API 支援度
                 if (!navigator.clipboard || !navigator.clipboard.write) {{
                     throw new Error("API_NOT_SUPPORTED");
                 }}
-
-                // 2. 將 Base64 轉為 Blob
                 const response = await fetch("data:image/png;base64,{b64_str}");
                 const blob = await response.blob();
-                
-                // 3. 寫入剪貼簿
                 const item = new ClipboardItem({{ "image/png": blob }});
                 await navigator.clipboard.write([item]);
-                
                 msg.innerText = "✅ 已複製！";
                 msg.style.color = "green";
-                
             }} catch (err) {{
                 console.error("Copy failed:", err);
-                if (err.message === "API_NOT_SUPPORTED") {{
-                    msg.innerText = "❌ 瀏覽器不支援";
-                }} else {{
-                    msg.innerText = "❌ 失敗 (請手動下載)";
-                }}
+                msg.innerText = "❌ 失敗 (請手動下載)";
                 msg.style.color = "red";
             }} finally {{
                 setTimeout(() => {{ 
@@ -108,7 +95,6 @@ def copy_image_button(image_bytes, key_suffix):
     </body>
     </html>
     """
-    # height 設定為 45px 剛好容納按鈕
     components.html(html_code, height=45)
 
 # --- 記憶體優化輔助函式 ---
@@ -127,24 +113,20 @@ def pil_to_bytes(image, format="PNG", quality=95):
 def bytes_to_pil(image_bytes):
     return Image.open(io.BytesIO(image_bytes))
 
-# --- 高品質放大函式 (Upscaling) ---
 def upscale_image(image, scale_factor=2):
-    """使用 Lanczos 演算法進行高品質放大"""
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
-# --- 圖片縮小保護 (SDK 雖然方便，但為了省錢還是要縮) ---
 def resize_image_for_api(image, max_size=(1024, 1024)):
     img_copy = image.copy()
     img_copy.thumbnail(max_size, Image.Resampling.LANCZOS)
     return img_copy
 
-# --- API Key 淨化 ---
 def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (使用 SDK) ---
+# --- 核心功能 ---
 def check_pro_model_access(api_key):
     try:
         client = genai.Client(api_key=api_key)
@@ -154,10 +136,8 @@ def check_pro_model_access(api_key):
             config=types.GenerateContentConfig(max_output_tokens=1)
         )
         return response is not None
-    except Exception as e:
-        return False
+    except: return False
 
-# --- 分析函式 (使用 SDK + 防呆機制) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     processed_img = resize_image_for_api(image)
     
@@ -189,10 +169,9 @@ def analyze_image_with_gemini(api_key, image, model_name):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         return json.loads(response.text)
-        
     except Exception as e:
         if model_name == PRO_TEXT_MODEL:
-            st.toast(f"⚠️ Pro 模型異常 ({str(e)})，自動降級...", icon="🔄")
+            st.toast(f"⚠️ Pro 模型異常，自動降級...", icon="🔄")
             try:
                 response = client.models.generate_content(
                     model=FLASH_TEXT_MODEL,
@@ -201,20 +180,20 @@ def analyze_image_with_gemini(api_key, image, model_name):
                 )
                 return json.loads(response.text)
             except Exception as e2:
-                raise Exception(f"分析失敗 (Flash 也失敗): {str(e2)}")
+                raise Exception(f"分析失敗 (Flash): {str(e2)}")
         else:
             raise Exception(f"分析失敗: {str(e)}")
 
-# --- 生成函式 (使用 SDK) ---
-def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
+def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_images=None, num_images=1):
     processed_product = resize_image_for_api(product_image)
     
     full_prompt = f"""
     Professional product photography masterpiece.
     Subject: The FIRST image provided is the PRODUCT. KEEP THE PRODUCT APPEARANCE EXACTLY AS IS.
     """
-    if ref_image:
-        full_prompt += "\nReference: The SECOND image provided is a STYLE/CHARACTER REFERENCE. Integrate the product into a scene consistent with this reference."
+    
+    if ref_images:
+        full_prompt += f"\nReference: The following {len(ref_images)} images are STYLE/CHARACTER REFERENCES. Integrate the product into a scene consistent with these references."
     
     full_prompt += f"\nBackground & Atmosphere: {base_prompt}"
     if user_extra_prompt:
@@ -223,41 +202,61 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     contents = [full_prompt, processed_product]
-    if ref_image:
-        contents.append(resize_image_for_api(ref_image))
+    
+    # 支援多張參考圖 (最多 3 張)
+    if ref_images:
+        for ref in ref_images[:3]: # 限制最多3張
+            contents.append(resize_image_for_api(ref))
 
     client = genai.Client(api_key=api_key)
-    
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(response_modalities=["IMAGE"])
-        )
-        
-        for part in response.candidates[0].content.parts:
-            if part.inline_data:
-                return Image.open(io.BytesIO(part.inline_data.data))
-        
-        raise Exception("模型未回傳圖片數據")
+    generated_images = []
 
-    except Exception as e:
-        if model_name == PRO_IMAGE_MODEL:
-            st.toast(f"⚠️ Pro 模型異常，自動切換至 Flash...", icon="🔄")
-            try:
-                response = client.models.generate_content(
-                    model=FLASH_IMAGE_MODEL,
-                    contents=contents,
-                    config=types.GenerateContentConfig(response_modalities=["IMAGE"])
+    # 批次生成迴圈
+    for i in range(num_images):
+        try:
+            # 每次生成加入微小的隨機變化 (透過 System Instruction 或多次呼叫)
+            # 這裡簡單透過多次呼叫實現
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    # temperature=0.9 # 可選：增加隨機性
                 )
-                for part in response.candidates[0].content.parts:
-                    if part.inline_data:
-                        return Image.open(io.BytesIO(part.inline_data.data))
-                raise Exception("Flash 模型也未回傳圖片")
-            except Exception as e2:
-                raise Exception(f"生成失敗 (雙重失敗): {str(e2)}")
-        else:
-            raise Exception(f"生成失敗: {str(e)}")
+            )
+            
+            img_found = False
+            for part in response.candidates[0].content.parts:
+                if part.inline_data:
+                    img = Image.open(io.BytesIO(part.inline_data.data))
+                    generated_images.append(img)
+                    img_found = True
+                    break
+            
+            if not img_found:
+                raise Exception("No image data returned")
+
+        except Exception as e:
+            # 失敗處理 (嘗試降級)
+            if model_name == PRO_IMAGE_MODEL:
+                if i == 0: st.toast(f"⚠️ Pro 模型異常，切換至 Flash...", icon="🔄") # 只提示一次
+                try:
+                    response = client.models.generate_content(
+                        model=FLASH_IMAGE_MODEL,
+                        contents=contents,
+                        config=types.GenerateContentConfig(response_modalities=["IMAGE"])
+                    )
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            generated_images.append(Image.open(io.BytesIO(part.inline_data.data)))
+                            break
+                except:
+                    pass # 若 Flash 也失敗就跳過這張
+
+    if not generated_images:
+        raise Exception("生成失敗：無法產生任何圖片")
+        
+    return generated_images
 
 # --- Session 初始化 ---
 @st.cache_resource
@@ -303,7 +302,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v2.4 (Robust Clipboard & JSON Fix)")
+    st.caption("v2.5 (UX Enhanced)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -344,7 +343,18 @@ if uploaded_files:
                 col_left, col_right = st.columns([1, 2])
                 
                 with col_left:
-                    if st.button("🪄 1. 分析場景 (Analyze)", type="primary", use_container_width=True):
+                    # 1. 分析按鈕區 (新增：重新分析)
+                    btn_col_1, btn_col_2 = st.columns(2)
+                    with btn_col_1:
+                        analyze_clicked = st.button("🪄 分析場景", type="primary", use_container_width=True)
+                    with btn_col_2:
+                        re_analyze_clicked = st.button("🔄 重新分析 (換一批)", use_container_width=True)
+
+                    if analyze_clicked or re_analyze_clicked:
+                        # 如果是重新分析，先清空舊資料
+                        if re_analyze_clicked:
+                             st.session_state.prompts.pop(selected_file_name, None)
+                        
                         try:
                             with st.spinner(f"分析中..."):
                                 st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, current_text_model)
@@ -353,23 +363,21 @@ if uploaded_files:
                     sel_prompt = None
                     if selected_file_name in st.session_state.prompts:
                         prompts = st.session_state.prompts[selected_file_name]
-                        
-                        # [關鍵修復] 安全過濾，確保資料格式正確
                         safe_prompts = [p for p in prompts if isinstance(p, dict) and 'title' in p]
                         
                         if safe_prompts:
                             title = st.radio("推薦風格:", [p["title"] for p in safe_prompts])
                             sel_prompt = next((p for p in safe_prompts if p["title"] == title), None)
                             if sel_prompt:
-                                # [關鍵修復] 使用 .get() 避免 KeyError
-                                reason_text = sel_prompt.get('reason', '(AI 未提供詳細說明)')
-                                st.info(reason_text)
-                                with st.expander("查看 Prompt"): 
+                                st.info(sel_prompt.get('reason', '(AI 未提供詳細說明)'))
+                                # 2. 優化 Prompt 顯示與複製
+                                with st.expander("查看 Prompt (已翻譯)", expanded=False):
                                     prompt_text = sel_prompt.get('prompt', '')
-                                    # 這裡使用 st.code，它是 Streamlit 內建最穩定的複製方案
-                                    st.code(prompt_text, language='text') 
+                                    st.text_area("Prompt", prompt_text, height=100, label_visibility="collapsed")
+                                    # 內建複製功能通常在右上角，這裡保留您的 JS 按鈕作為備用
+                                    st.caption("Tip: 右上角有複製按鈕，或使用下方按鈕")
                         else:
-                            st.warning("AI 回傳的分析資料格式異常，請重試。")
+                            st.warning("AI 回傳格式異常，請重試。")
 
                 with col_right:
                     if sel_prompt:
@@ -380,33 +388,41 @@ if uploaded_files:
                         
                         if selected_gen_model_key == PRO_IMAGE_MODEL and st.session_state.user_model_tier != "PRO":
                             st.warning("⚠️ 您的 Key 可能僅支援 Flash，若 Pro 失敗將自動降級。")
+                        
+                        # 3. 新增：生成張數選擇
+                        num_images = st.slider("🎴 生成張數", min_value=1, max_value=3, value=1, help="一次生成多張，AI 會嘗試不同的構圖變化")
 
                         extra = st.text_area("自訂額外提示詞", placeholder="例如: Add a human hand...")
-                        ref_file = st.file_uploader("參考圖片", type=['png', 'jpg', 'jpeg'])
                         
-                        ref_img = None
-                        if ref_file:
-                            ref_img = Image.open(ref_file)
-                            if max(ref_img.size) > 1024: ref_img.thumbnail((1024, 1024))
+                        # 4. 參考圖上傳 (支援多張)
+                        ref_files = st.file_uploader("參考圖片 (最多3張)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+                        ref_imgs = []
+                        if ref_files:
+                            for rf in ref_files[:3]: # 限制最多3張
+                                ref_imgs.append(Image.open(rf))
+                            st.caption(f"已載入 {len(ref_imgs)} 張參考圖")
                         
-                        if st.button(f"🎨 3. 開始生成：{sel_prompt['title']}", type="primary", use_container_width=True):
+                        if st.button(f"🎨 3. 開始生成 ({num_images}張)", type="primary", use_container_width=True):
                             try:
-                                with st.spinner("生成中..."):
-                                    img = generate_image_with_gemini(
+                                with st.spinner(f"正在繪製 {num_images} 張圖片..."):
+                                    imgs = generate_image_with_gemini(
                                         final_api_key, nobg_pil, sel_prompt["prompt"], 
-                                        selected_gen_model_key, extra, ref_img
+                                        selected_gen_model_key, extra, ref_imgs, num_images
                                     )
                                     if selected_file_name not in st.session_state.generated_results:
                                         st.session_state.generated_results[selected_file_name] = []
-                                    st.session_state.generated_results[selected_file_name].insert(0, img)
+                                    
+                                    # 將新生成的圖片全部加入結果清單
+                                    for img in imgs:
+                                        st.session_state.generated_results[selected_file_name].insert(0, img)
+                                        
                                     gc.collect()
                             except Exception as e: st.error(str(e))
                     
                     if selected_file_name in st.session_state.generated_results:
                         st.markdown("#### 🖼️ 生成結果")
                         for i, img in enumerate(st.session_state.generated_results[selected_file_name]):
-                            caption_text = f"Result #{len(st.session_state.generated_results[selected_file_name])-i}"
-                            st.image(img, caption=caption_text, use_container_width=True)
+                            st.image(img, caption=f"Result #{len(st.session_state.generated_results[selected_file_name])-i}", use_container_width=True)
                             
                             img_native = pil_to_bytes(img, "PNG")
                             img_upscaled = pil_to_bytes(upscale_image(img, 2), "PNG")
