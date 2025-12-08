@@ -1,3 +1,4 @@
+# Version: v1.27 (Model Name Fix)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -20,8 +21,8 @@ st.set_page_config(
 )
 
 # --- 常數設定 ---
-PRO_TEXT_MODEL = "gemini-3-pro-preview"
-PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
+PRO_TEXT_MODEL = "gemini-3-pro"
+PRO_IMAGE_MODEL = "gemini-3-pro-image"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
@@ -132,23 +133,23 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- 核心功能：API Key 強力淨化 (關鍵!) ---
+# --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
-    # 只保留英數字、底線、減號，徹底殺死隱形字元
+    # 只保留英數字、底線、減號，徹底移除隱形字元
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (回歸 v1.4 原始寫法) ---
+# --- 核心功能：驗證 API Key (回歸 v1.4 風格：字串拼接) ---
 def check_pro_model_access(api_key):
-    # 直接把 key 拼在 URL 後面 (v1.4 風格)
+    # 直接在 URL 帶上 Key (v1.4 方式，避開 Adapter Error)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
     try: 
-        # 無限等待，不使用 params=...，不使用 Session
+        # 無限等待，不使用 params
         return requests.post(url, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (回歸 v1.4 連線方式) ---
+# --- 分析函式 (回歸 v1.4 風格 + 5種場景) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -176,15 +177,13 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        # [關鍵回歸]：像 v1.4 一樣直接把 Key 放在 URL 裡
-        # 但因為我們前面已經用 clean_api_key() 洗過了，所以這次是安全的
+        # 使用 v1.4 的 URL 拼接方式
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-        
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 不設 timeout，無限等待
+                # 無限等待
                 res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -194,7 +193,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            # 顯示 url (隱藏 key) 幫助除錯
+            # 遮蔽 Key 後顯示錯誤
             safe_url = url.split("?")[0]
             raise Exception(f"連線失敗 (Network Error)。網址: {safe_url}, 錯誤: {str(last_error)}")
         return res
@@ -227,7 +226,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (回歸 v1.4 連線方式) ---
+# --- 生成函式 (回歸 v1.4 風格 + 自動 8K) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -253,7 +252,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        # [關鍵回歸]：v1.4 風格
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
         res = None
         last_error = None
@@ -308,8 +306,6 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 with st.sidebar:
     st.header("⚙️ 設定")
     raw_api_key = st.text_input("Google API Key (選填)", type="password")
-    
-    # 雖然用舊版連線，但這裡一定要用 clean_api_key 保護
     user_api_key = clean_api_key(raw_api_key)
     
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
@@ -340,7 +336,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.26 (Hybrid Stable)")
+    st.caption("v1.27 (Model Name Fix)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -402,7 +398,7 @@ if uploaded_files:
                     if sel_prompt:
                         st.markdown("#### 🛠️ 2. 生成設定")
                         
-                        # 預設選 Pro
+                        # 模型選擇器：預設 Pro (透過 key 順序或 index)
                         model_options = {PRO_IMAGE_MODEL: "🚀 Pro (高畫質/預設)", FLASH_IMAGE_MODEL: "⚡ Flash (快速)"}
                         selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
                         
