@@ -24,7 +24,7 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 (修復版) ---
+# --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     
@@ -111,10 +111,10 @@ def image_to_base64(image, max_size=(1024, 1024)):
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload, timeout=10).status_code == 200
+    try: return requests.post(url, json=payload, timeout=15).status_code == 200 # 驗證超時設為 15s
     except: return False
 
-# --- 分析函式 (修正錯誤捕捉) ---
+# --- 分析函式 (Timeout 延長至 60s) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -146,8 +146,8 @@ def analyze_image_with_gemini(api_key, image, model_name):
         last_error = None
         for i in range(3):
             try:
-                # 設定 timeout 避免無限卡住
-                res = requests.post(url, json=payload, timeout=30)
+                # 關鍵修改：將 Timeout 延長至 60 秒 (原 30 秒)
+                res = requests.post(url, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -156,8 +156,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            # 拋出真正的連線錯誤訊息
-            raise Exception(f"連線失敗：無法連接到 Google 伺服器。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線逾時或失敗：AI 思考太久或網路不穩。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -187,7 +186,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (修正錯誤捕捉) ---
+# --- 生成函式 (Timeout 延長至 90s) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -217,7 +216,8 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload, timeout=45) # 生圖比較慢，timeout 設長一點
+                # 關鍵修改：將 Timeout 延長至 90 秒 (原 45 秒)，生圖通常比較慢
+                res = requests.post(url, json=payload, timeout=90)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -226,7 +226,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗：無法連接到 Google 伺服器。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線逾時：生圖花費時間過長。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -292,7 +292,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.11 (Network Debug)")
+    st.caption("v1.12 (Timeout Extended)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
