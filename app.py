@@ -1,4 +1,4 @@
-# Version: v2.2 (Robust JSON Handling)
+# Version: v2.3 (Robust Fix & Copy Workaround)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -28,79 +28,54 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 ---
+# --- JS 元件：複製圖片到剪貼簿 (嘗試修復權限問題) ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     html_code = f"""
-    <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
-            background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
-            padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
-        ">
-            📋 複製圖片
-        </button>
-        <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
-    </div>
-    <script>
-    async function copyImage_{key_suffix}() {{
-        const btn = document.getElementById("btn_img_{key_suffix}");
-        const msg = document.getElementById("msg_img_{key_suffix}");
-        btn.style.backgroundColor = "#e0e0e0";
-        msg.innerText = "⏳...";
-        try {{
-            if (!navigator.clipboard || !navigator.clipboard.write) {{ throw new Error("不支援"); }}
-            const response = await fetch("data:image/png;base64,{b64_str}");
-            const blob = await response.blob();
-            const item = new ClipboardItem({{ "image/png": blob }});
-            await navigator.clipboard.write([item]);
-            msg.innerText = "✅ 已複製！";
-            msg.style.color = "green";
-        }} catch (err) {{
-            console.error(err);
-            msg.innerText = "❌ 失敗";
-            msg.style.color = "red";
-        }} finally {{
-            setTimeout(() => {{ 
-                btn.style.backgroundColor = "#f0f2f6"; 
-                if(msg.innerText.includes("已複製")) msg.innerText = "";
-            }}, 2000);
+    <html>
+    <body>
+        <div style="display: flex; justify-content: center; margin-top: 5px;">
+            <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+                background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
+                padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
+            ">
+                📋 複製圖片
+            </button>
+            <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
+        </div>
+        <script>
+        async function copyImage_{key_suffix}() {{
+            const btn = document.getElementById("btn_img_{key_suffix}");
+            const msg = document.getElementById("msg_img_{key_suffix}");
+            btn.style.backgroundColor = "#e0e0e0";
+            msg.innerText = "⏳...";
+            try {{
+                // 嘗試使用 fetch 取得 blob
+                const response = await fetch("data:image/png;base64,{b64_str}");
+                const blob = await response.blob();
+                
+                // 嘗試寫入剪貼簿
+                const item = new ClipboardItem({{ "image/png": blob }});
+                await navigator.clipboard.write([item]);
+                
+                msg.innerText = "✅ 已複製！";
+                msg.style.color = "green";
+            }} catch (err) {{
+                console.error(err);
+                msg.innerText = "❌ 瀏覽器阻擋 (請用下載)";
+                msg.style.color = "red";
+            }} finally {{
+                setTimeout(() => {{ 
+                    btn.style.backgroundColor = "#f0f2f6"; 
+                    if(msg.innerText.includes("已複製")) msg.innerText = "";
+                }}, 2500);
+            }}
         }}
-    }}
-    </script>
+        </script>
+    </body>
+    </html>
     """
     components.html(html_code, height=50)
-
-# --- JS 元件：複製文字到剪貼簿 ---
-def copy_text_button(text, key_suffix):
-    safe_text = json.dumps(text)
-    html_code = f"""
-    <div style="margin-top: 5px;">
-        <button id="btn_txt_{key_suffix}" onclick="copyText_{key_suffix}()" style="
-            background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
-            padding: 2px 8px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 5px;
-        ">
-            📋 複製 Prompt
-        </button>
-        <span id="msg_txt_{key_suffix}" style="margin-left: 5px; font-size: 11px;"></span>
-    </div>
-    <script>
-    async function copyText_{key_suffix}() {{
-        const btn = document.getElementById("btn_txt_{key_suffix}");
-        const msg = document.getElementById("msg_txt_{key_suffix}");
-        try {{
-            await navigator.clipboard.writeText({safe_text});
-            msg.innerText = "✅ Copied!";
-            msg.style.color = "green";
-        }} catch (err) {{
-            msg.innerText = "❌ Failed";
-            msg.style.color = "red";
-        }} finally {{
-            setTimeout(() => {{ msg.innerText = ""; }}, 2000);
-        }}
-    }}
-    </script>
-    """
-    components.html(html_code, height=40)
 
 # --- 記憶體優化輔助函式 ---
 def pil_to_bytes(image, format="PNG", quality=95):
@@ -139,7 +114,6 @@ def clean_api_key(key):
 def check_pro_model_access(api_key):
     try:
         client = genai.Client(api_key=api_key)
-        # 發送一個極小的測試請求
         response = client.models.generate_content(
             model=PRO_TEXT_MODEL,
             contents="Ping",
@@ -149,9 +123,8 @@ def check_pro_model_access(api_key):
     except Exception as e:
         return False
 
-# --- 分析函式 (使用 SDK) ---
+# --- 分析函式 (使用 SDK + 防呆機制) ---
 def analyze_image_with_gemini(api_key, image, model_name):
-    # 縮圖保護
     processed_img = resize_image_for_api(image)
     
     prompt = """
@@ -175,7 +148,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
     
     client = genai.Client(api_key=api_key)
     
-    # 自動降級邏輯
     try:
         response = client.models.generate_content(
             model=model_name,
@@ -185,7 +157,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
         return json.loads(response.text)
         
     except Exception as e:
-        # 如果是 Pro 模型失敗，嘗試切換到 Flash
+        # 降級嘗試
         if model_name == PRO_TEXT_MODEL:
             st.toast(f"⚠️ Pro 模型異常 ({str(e)})，自動降級...", icon="🔄")
             try:
@@ -202,7 +174,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
 
 # --- 生成函式 (使用 SDK) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
-    # 縮圖保護
     processed_product = resize_image_for_api(product_image)
     
     full_prompt = f"""
@@ -216,36 +187,28 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # 強制全開 8K 畫質
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
-    # 準備內容：Prompt + 商品圖 + (選填)參考圖
     contents = [full_prompt, processed_product]
     if ref_image:
         contents.append(resize_image_for_api(ref_image))
 
     client = genai.Client(api_key=api_key)
     
-    # 自動降級邏輯
     try:
         response = client.models.generate_content(
             model=model_name,
             contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"]
-            )
+            config=types.GenerateContentConfig(response_modalities=["IMAGE"])
         )
         
-        # [關鍵修正]: SDK 回傳的 data 已經是 bytes，不需要 b64decode
         for part in response.candidates[0].content.parts:
             if part.inline_data:
-                # 直接讀取 bytes
                 return Image.open(io.BytesIO(part.inline_data.data))
         
         raise Exception("模型未回傳圖片數據")
 
     except Exception as e:
-        # 如果是 Pro 模型失敗，嘗試切換到 Flash
         if model_name == PRO_IMAGE_MODEL:
             st.toast(f"⚠️ Pro 模型異常，自動切換至 Flash...", icon="🔄")
             try:
@@ -256,7 +219,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
                 )
                 for part in response.candidates[0].content.parts:
                     if part.inline_data:
-                        # 直接讀取 bytes
                         return Image.open(io.BytesIO(part.inline_data.data))
                 raise Exception("Flash 模型也未回傳圖片")
             except Exception as e2:
@@ -308,7 +270,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v2.2 (Robust JSON Handling)")
+    st.caption("v2.3 (Robust Fix & Copy Workaround)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -359,19 +321,20 @@ if uploaded_files:
                     if selected_file_name in st.session_state.prompts:
                         prompts = st.session_state.prompts[selected_file_name]
                         
-                        # [關鍵修正]：安全過濾，確保資料格式正確
+                        # [關鍵修復] 安全過濾，確保資料格式正確
                         safe_prompts = [p for p in prompts if isinstance(p, dict) and 'title' in p]
                         
                         if safe_prompts:
                             title = st.radio("推薦風格:", [p["title"] for p in safe_prompts])
                             sel_prompt = next((p for p in safe_prompts if p["title"] == title), None)
                             if sel_prompt:
-                                # [關鍵修正]：使用 .get() 避免 KeyError
-                                st.info(sel_prompt.get('reason', '(AI 未提供詳細說明)'))
+                                # [關鍵修復] 使用 .get() 避免 KeyError
+                                reason_text = sel_prompt.get('reason', '(AI 未提供詳細說明)')
+                                st.info(reason_text)
                                 with st.expander("查看 Prompt"): 
                                     prompt_text = sel_prompt.get('prompt', '')
-                                    st.code(prompt_text)
-                                    copy_text_button(prompt_text, f"p_{selected_file_name}")
+                                    # 改用 st.code 內建的複製功能，這是最穩定的方案
+                                    st.code(prompt_text, language='text') 
                         else:
                             st.warning("AI 回傳的分析資料格式異常，請重試。")
 
