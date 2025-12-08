@@ -5,8 +5,6 @@ import io
 import zipfile
 import time
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import json
 import base64
 import gc
@@ -27,21 +25,10 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- 建立一個全域的 Request Session (關鍵修復) ---
-# 這能解決 "No connection adapters" 並處理 Retry
-def get_session():
-    session = requests.Session()
-    retry = Retry(connect=3, backoff_factor=0.5)
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    # 重要：忽略環境變數中的 Proxy 設定，避免被干擾
-    session.trust_env = False 
-    return session
-
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
+    
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
         <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
@@ -57,15 +44,20 @@ def copy_image_button(image_bytes, key_suffix):
     async function copyImage_{key_suffix}() {{
         const btn = document.getElementById("btn_{key_suffix}");
         const msg = document.getElementById("msg_{key_suffix}");
+        
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         msg.style.color = "gray";
+
         try {{
-            if (!navigator.clipboard || !navigator.clipboard.write) {{ throw new Error("不支援"); }}
+            if (!navigator.clipboard || !navigator.clipboard.write) {{
+                throw new Error("瀏覽器不支援");
+            }}
             const response = await fetch("data:image/png;base64,{b64_str}");
             const blob = await response.blob();
             const item = new ClipboardItem({{ "image/png": blob }});
             await navigator.clipboard.write([item]);
+            
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
@@ -101,6 +93,7 @@ def bytes_to_pil(image_bytes):
 
 # --- 高品質放大函式 (Upscaling) ---
 def upscale_image(image, scale_factor=2):
+    """使用 Lanczos 演算法進行高品質放大"""
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
@@ -115,10 +108,10 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- 核心功能：API Key 強力淨化 ---
+# --- 核心功能：API Key 強力淨化 (保留 v1.15 的優點) ---
 def clean_api_key(key):
     if not key: return ""
-    # 只保留英數字、底線、減號，其餘全部殺掉
+    # 只保留英數字、底線、減號，徹底移除隱形字元
     cleaned_key = re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
     return cleaned_key
 
@@ -126,12 +119,10 @@ def clean_api_key(key):
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: 
-        session = get_session()
-        return session.post(url, json=payload, timeout=10).status_code == 200 
+    try: return requests.post(url, json=payload, timeout=10).status_code == 200 
     except: return False
 
-# --- 分析函式 ---
+# --- 分析函式 (改回 requests.post 簡單連線 + Timeout 保護) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -158,25 +149,22 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        # 強制轉型為 str，去除任何可能的隱形物件屬性
+        # 這裡改回最單純的 requests.post，但保留 str() 強制轉型
         url = str(f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}")
-        
-        session = get_session() # 使用強化的 Session
         res = None
         last_error = None
-        
         for i in range(3):
             try:
-                res = session.post(url, json=payload, timeout=60)
+                res = requests.post(url, json=payload, timeout=60) # 60秒超時
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Request attempt {i+1} failed: {e}")
+                print(f"Attempt {i+1} error: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗 (Adapter Error)。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線失敗 (Network Error)。請檢查網路或 API Key。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -206,7 +194,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 ---
+# --- 生成函式 (改回 requests.post 簡單連線 + Timeout 保護) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -232,23 +220,20 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     
     def _send_request(target):
         url = str(f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}")
-        
-        session = get_session()
         res = None
         last_error = None
-        
         for i in range(3):
             try:
-                res = session.post(url, json=payload, timeout=90)
+                res = requests.post(url, json=payload, timeout=90) # 90秒超時
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Gen Request attempt {i+1} failed: {e}")
+                print(f"Gen Attempt {i+1} error: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗 (Adapter Error)。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -317,7 +302,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.15 (Final Connectivity Fix)")
+    st.caption("v1.16 (Simplicity & Stability)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
