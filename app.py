@@ -25,16 +25,6 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- 關鍵修復：建立乾淨的連線 Session ---
-def get_clean_session():
-    """
-    建立一個強制忽略系統 Proxy 設定的 Session。
-    解決 'No connection adapters' 錯誤的終極手段。
-    """
-    session = requests.Session()
-    session.trust_env = False  # 關鍵！忽略系統環境變數中的 Proxy 設定
-    return session
-
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
@@ -142,24 +132,23 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- 核心功能：API Key 強力淨化 ---
+# --- 核心功能：API Key 強力淨化 (關鍵!) ---
 def clean_api_key(key):
     if not key: return ""
+    # 只保留英數字、底線、減號，徹底殺死隱形字元
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (Bypass Proxy) ---
+# --- 核心功能：驗證 API Key (回歸 v1.4 原始寫法) ---
 def check_pro_model_access(api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent"
-    params = {"key": api_key}
+    # 直接把 key 拼在 URL 後面 (v1.4 風格)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    
     try: 
-        session = get_clean_session() # 使用乾淨的 Session
-        # 無限等待，使用 params
-        return session.post(url, params=params, json=payload).status_code == 200 
+        # 無限等待，不使用 params=...，不使用 Session
+        return requests.post(url, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (Bypass Proxy + Params) ---
+# --- 分析函式 (回歸 v1.4 連線方式) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -174,7 +163,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     2. 真實生活感 (Authentic Lifestyle)
     3. 幾何藝術 (Abstract Geometric)
     4. 自然有機 (Nature & Organic)
-    5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景)
+    5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景，標題開頭請加 '🤖 AI推薦：')
     
     【重要指令】：
     1. 所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
@@ -187,18 +176,16 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-        query_params = {"key": api_key}
-        
-        # 使用乾淨的 Session
-        session = get_clean_session()
+        # [關鍵回歸]：像 v1.4 一樣直接把 Key 放在 URL 裡
+        # 但因為我們前面已經用 clean_api_key() 洗過了，所以這次是安全的
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
         
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 無限等待
-                res = session.post(url, params=query_params, json=payload)
+                # 不設 timeout，無限等待
+                res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -207,9 +194,9 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            # 這裡不使用 timeout，保持無限等待，但會拋出連線錯誤詳情
-            try: return session.post(url, params=query_params, json=payload)
-            except: raise Exception(f"連線失敗 (Proxy/Network Error)。詳情: {str(last_error)}")
+            # 顯示 url (隱藏 key) 幫助除錯
+            safe_url = url.split("?")[0]
+            raise Exception(f"連線失敗 (Network Error)。網址: {safe_url}, 錯誤: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -240,7 +227,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (Bypass Proxy + Params) ---
+# --- 生成函式 (回歸 v1.4 連線方式) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -266,16 +253,14 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
-        query_params = {"key": api_key}
-        
-        session = get_clean_session() # 使用乾淨的 Session
-        
+        # [關鍵回歸]：v1.4 風格
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
         res = None
         last_error = None
         for i in range(3):
             try:
-                res = session.post(url, params=query_params, json=payload)
+                # 無限等待
+                res = requests.post(url, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -284,8 +269,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            try: return session.post(url, params=query_params, json=payload)
-            except: raise Exception(f"連線失敗 (Proxy/Network Error)。詳情: {str(last_error)}")
+            raise Exception(f"連線失敗 (Network Error)。錯誤: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -324,6 +308,8 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 with st.sidebar:
     st.header("⚙️ 設定")
     raw_api_key = st.text_input("Google API Key (選填)", type="password")
+    
+    # 雖然用舊版連線，但這裡一定要用 clean_api_key 保護
     user_api_key = clean_api_key(raw_api_key)
     
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
@@ -354,7 +340,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.25 (Proxy Bypass Edition)")
+    st.caption("v1.26 (Hybrid Stable)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -416,6 +402,7 @@ if uploaded_files:
                     if sel_prompt:
                         st.markdown("#### 🛠️ 2. 生成設定")
                         
+                        # 預設選 Pro
                         model_options = {PRO_IMAGE_MODEL: "🚀 Pro (高畫質/預設)", FLASH_IMAGE_MODEL: "⚡ Flash (快速)"}
                         selected_gen_model_key = st.selectbox("選擇生成模型", list(model_options.keys()), format_func=lambda x: model_options[x], index=0)
                         
