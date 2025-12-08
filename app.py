@@ -5,10 +5,12 @@ import io
 import zipfile
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 import base64
 import gc
-import re  # 新增：正規表達式套件，用於強力淨化
+import re
 import streamlit.components.v1 as components
 
 # --- 設定頁面資訊 ---
@@ -24,6 +26,18 @@ PRO_TEXT_MODEL = "gemini-3-pro-preview"
 PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+
+# --- 建立一個全域的 Request Session (關鍵修復) ---
+# 這能解決 "No connection adapters" 並處理 Retry
+def get_session():
+    session = requests.Session()
+    retry = Retry(connect=3, backoff_factor=0.5)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    # 重要：忽略環境變數中的 Proxy 設定，避免被干擾
+    session.trust_env = False 
+    return session
 
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
@@ -101,21 +115,20 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- 核心功能：API Key 強力淨化 (關鍵修正) ---
+# --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
-    # 1. 先去除前後空白
-    key = key.strip()
-    # 2. 使用 Regex 只保留合法字元 (A-Z, a-z, 0-9, -, _)
-    # 這會把所有隱形字元、空格、換行、引號全部殺掉
-    cleaned_key = re.sub(r'[^a-zA-Z0-9\-\_]', '', key)
+    # 只保留英數字、底線、減號，其餘全部殺掉
+    cleaned_key = re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
     return cleaned_key
 
 # --- 核心功能：驗證 API Key ---
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload, timeout=15).status_code == 200 
+    try: 
+        session = get_session()
+        return session.post(url, json=payload, timeout=10).status_code == 200 
     except: return False
 
 # --- 分析函式 ---
@@ -145,21 +158,25 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        # 強制轉型為 str，去除任何可能的隱形物件屬性
+        url = str(f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}")
+        
+        session = get_session() # 使用強化的 Session
         res = None
         last_error = None
+        
         for i in range(3):
             try:
-                res = requests.post(url, json=payload, timeout=60)
+                res = session.post(url, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Attempt {i} failed: {e}")
+                print(f"Request attempt {i+1} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗，請檢查網路或 API Key 格式。詳情: {str(last_error)}")
+            raise Exception(f"連線失敗 (Adapter Error)。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -214,21 +231,24 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        url = str(f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}")
+        
+        session = get_session()
         res = None
         last_error = None
+        
         for i in range(3):
             try:
-                res = requests.post(url, json=payload, timeout=90)
+                res = session.post(url, json=payload, timeout=90)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Gen Attempt {i} failed: {e}")
+                print(f"Gen Request attempt {i+1} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗。詳情: {str(last_error)}")
+            raise Exception(f"連線失敗 (Adapter Error)。錯誤詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -267,9 +287,7 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 with st.sidebar:
     st.header("⚙️ 設定")
     raw_api_key = st.text_input("Google API Key (選填)", type="password")
-    
-    # 這裡會自動把 Key 清乾淨
-    user_api_key = clean_api_key(raw_api_key)
+    user_api_key = clean_api_key(raw_api_key) # 強力淨化
     
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
     final_api_key = clean_api_key(final_api_key)
@@ -299,7 +317,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.14 (Nuclear Key Cleaner)")
+    st.caption("v1.15 (Final Connectivity Fix)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
