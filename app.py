@@ -24,7 +24,7 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 (修復版) ---
+# --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     
@@ -45,25 +45,23 @@ def copy_image_button(image_bytes, key_suffix):
         const msg = document.getElementById("msg_{key_suffix}");
         
         btn.style.backgroundColor = "#e0e0e0";
-        msg.innerText = "⏳ 處理中...";
+        msg.innerText = "⏳...";
         msg.style.color = "gray";
 
         try {{
             if (!navigator.clipboard || !navigator.clipboard.write) {{
-                throw new Error("瀏覽器不支援或非 HTTPS 環境");
+                throw new Error("瀏覽器不支援");
             }}
-
             const response = await fetch("data:image/png;base64,{b64_str}");
             const blob = await response.blob();
-            
             const item = new ClipboardItem({{ "image/png": blob }});
             await navigator.clipboard.write([item]);
             
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
-            console.error("Copy failed:", err);
-            msg.innerText = "❌ 失敗 (請確認權限)";
+            console.error(err);
+            msg.innerText = "❌ 失敗";
             msg.style.color = "red";
         }} finally {{
             setTimeout(() => {{ 
@@ -116,7 +114,7 @@ def check_pro_model_access(api_key):
     try: return requests.post(url, json=payload).status_code == 200
     except: return False
 
-# --- 分析函式 (修改：新增 AI 推薦場景) ---
+# --- 分析函式 (修正變數作用域錯誤 + AI 推薦場景) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -144,15 +142,22 @@ def analyze_image_with_gemini(api_key, image, model_name):
     
     def _send_request(target_model):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        res = None # 初始化變數，防止 UnboundLocalError
         for i in range(3):
             try:
                 res = requests.post(url, json=payload)
-                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): return res
-            except: pass
+                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
+                    return res
+            except: 
+                pass
             time.sleep(2 ** (i + 1))
+        
+        if res is None:
+            raise Exception("連線失敗：無法連接到 Google 伺服器。")
         return res
 
     response = _send_request(model_name)
+    
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
         st.toast(f"⚠️ Pro 模型異常，自動降級...", icon="🔄")
         time.sleep(1)
@@ -170,7 +175,6 @@ def analyze_image_with_gemini(api_key, image, model_name):
         parts = cand.get('content', {}).get('parts', [])
         if not parts: raise Exception("No parts")
         
-        # 處理可能的 Markdown 格式 ```json ... ```
         text_content = parts[0]['text']
         if text_content.startswith("```json"):
             text_content = text_content.replace("```json", "").replace("```", "")
@@ -179,7 +183,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 ---
+# --- 生成函式 (修正變數作用域錯誤 + 強制高畫質) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -194,6 +198,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
+    # 強制加入最強畫質 Prompt
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
@@ -205,12 +210,18 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     
     def _send_request(target):
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        res = None # 初始化變數
         for i in range(3):
             try:
                 res = requests.post(url, json=payload)
-                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): return res
-            except: pass
+                if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
+                    return res
+            except: 
+                pass
             time.sleep(2 ** (i + 1))
+        
+        if res is None:
+            raise Exception("連線失敗：無法連接到 Google 伺服器。")
         return res
 
     response = _send_request(model_name)
@@ -276,7 +287,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.9 (AI Creative Mode)")
+    st.caption("v1.10 (Full Features + Bugfix)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
