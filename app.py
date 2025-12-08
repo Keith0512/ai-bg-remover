@@ -1,4 +1,4 @@
-# Version: v2.0 (Official SDK Edition)
+# Version: v2.1 (SDK Decode Fix)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -200,7 +200,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
         else:
             raise Exception(f"分析失敗: {str(e)}")
 
-# --- 生成函式 (使用 SDK) ---
+# --- 生成函式 (SDK 修復版) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     # 縮圖保護
     processed_product = resize_image_for_api(product_image)
@@ -231,13 +231,16 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         response = client.models.generate_content(
             model=model_name,
             contents=contents,
-            config=types.GenerateContentConfig(response_modalities=["IMAGE"])
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"]
+            )
         )
         
-        # 從回應中提取圖片
+        # [關鍵修正]: SDK 回傳的 data 已經是 bytes，不需要 b64decode
         for part in response.candidates[0].content.parts:
             if part.inline_data:
-                return Image.open(io.BytesIO(base64.b64decode(part.inline_data.data)))
+                # 直接讀取 bytes
+                return Image.open(io.BytesIO(part.inline_data.data))
         
         raise Exception("模型未回傳圖片數據")
 
@@ -253,7 +256,8 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
                 )
                 for part in response.candidates[0].content.parts:
                     if part.inline_data:
-                        return Image.open(io.BytesIO(base64.b64decode(part.inline_data.data)))
+                        # 直接讀取 bytes
+                        return Image.open(io.BytesIO(part.inline_data.data))
                 raise Exception("Flash 模型也未回傳圖片")
             except Exception as e2:
                 raise Exception(f"生成失敗 (雙重失敗): {str(e2)}")
@@ -304,7 +308,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v2.0 (Official SDK Edition)")
+    st.caption("v2.1 (SDK Decode Fix)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
