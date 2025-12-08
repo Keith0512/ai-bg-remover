@@ -25,7 +25,7 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
-# --- JS 元件：複製圖片到剪貼簿 ---
+# --- JS 元件：複製圖片到剪貼簿 (v1.8 修復版) ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     
@@ -113,14 +113,16 @@ def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key ---
+# --- 核心功能：驗證 API Key (使用簡單 requests) ---
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload, timeout=10).status_code == 200 
+    try: 
+        # timeout 設為 10 秒
+        return requests.post(url, json=payload, timeout=10).status_code == 200 
     except: return False
 
-# --- 分析函式 (v1.8 邏輯：4 種風格 + 強制高畫質 Prompt) ---
+# --- 分析函式 (v1.8: 固定 4 風格 + 強制高畫質) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -146,11 +148,13 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
+        # 使用最單純的字串串接，避免 params 參數導致的潛在問題
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
         res = None
         last_error = None
         for i in range(3):
             try:
+                # 簡單的 requests.post，不使用 Session
                 res = requests.post(url, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -190,7 +194,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (v1.8 邏輯：自動全開畫質，無需使用者選擇) ---
+# --- 生成函式 (v1.8: 自動全開畫質 + 簡單連線) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -205,7 +209,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # v1.8 特色：強制全開 8K 畫質
+    # 強制全開 8K 畫質
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
@@ -221,6 +225,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
         last_error = None
         for i in range(3):
             try:
+                # 簡單的 requests.post，不使用 Session
                 res = requests.post(url, json=payload, timeout=90)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -299,7 +304,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.8 (Stable & High Quality)")
+    st.caption("v1.8 (Stable: Simple Requests + AutoHQ)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
