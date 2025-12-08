@@ -29,18 +29,19 @@ def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
-        <button id="btn_img_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
+        <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
             background-color: #f0f2f6; border: 1px solid #d0d0d0; border-radius: 4px; 
             padding: 5px 10px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;
+            transition: background 0.2s;
         ">
             📋 複製圖片
         </button>
-        <span id="msg_img_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
+        <span id="msg_{key_suffix}" style="margin-left: 10px; font-size: 12px; align-self: center;"></span>
     </div>
     <script>
     async function copyImage_{key_suffix}() {{
-        const btn = document.getElementById("btn_img_{key_suffix}");
-        const msg = document.getElementById("msg_img_{key_suffix}");
+        const btn = document.getElementById("btn_{key_suffix}");
+        const msg = document.getElementById("msg_{key_suffix}");
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         try {{
@@ -179,7 +180,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     設計方向：
     1. 極簡高奢 (Minimalist High-End)
     2. 真實生活感 (Authentic Lifestyle)
-    3.幾何藝術 (Abstract Geometric)
+    3. 幾何藝術 (Abstract Geometric)
     4. 自然有機 (Nature & Organic)
     5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景，標題開頭請加 '🤖 AI推薦：')
     
@@ -425,11 +426,17 @@ if uploaded_files:
 
                         extra = st.text_area("自訂額外提示詞", placeholder="例如: Add a human hand...")
                         ref_file = st.file_uploader("參考圖片", type=['png', 'jpg', 'jpeg'])
-                        ref_img = Image.open(ref_file) if ref_file else None
+                        
+                        # [關鍵修正 2]：參考圖讀取時縮圖
+                        ref_img = None
+                        if ref_file:
+                            ref_img = Image.open(ref_file)
+                            if max(ref_img.size) > 1024: 
+                                ref_img.thumbnail((1024, 1024))
                         
                         if st.button(f"🎨 3. 開始生成：{sel_prompt['title']}", type="primary", use_container_width=True):
                             try:
-                                with st.spinner(f"生成中 ({selected_gen_model})..."):
+                                with st.spinner("生成中..."):
                                     img = generate_image_with_gemini(
                                         final_api_key, nobg_pil, sel_prompt["prompt"], 
                                         selected_gen_model, extra, ref_img
@@ -437,6 +444,9 @@ if uploaded_files:
                                     if selected_file_name not in st.session_state.generated_results:
                                         st.session_state.generated_results[selected_file_name] = []
                                     st.session_state.generated_results[selected_file_name].insert(0, img)
+                                    
+                                    # [關鍵修正 3]：生成後釋放 RAM
+                                    gc.collect()
                             except Exception as e: st.error(str(e))
                     
                     if selected_file_name in st.session_state.generated_results:
@@ -451,7 +461,4 @@ if uploaded_files:
                             c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 1])
                             with c_btn1: st.download_button("⬇️ 原圖", img_native, f"gen_{i}_native.png", "image/png", use_container_width=True)
                             with c_btn2: st.download_button("🔍 放大(2x)", img_upscaled, f"gen_{i}_upscaled.png", "image/png", use_container_width=True)
-                            with c_btn3: copy_image_button(img_native, f"gen_{selected_file_name}_{i}")
-                            st.divider()
-            else:
-                st.info("👈 請輸入 API Key 以使用 AI 功能")
+               
