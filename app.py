@@ -1,4 +1,4 @@
-# Version: v1.28 (Dynamic Model Fetch)
+# Version: v1.29 (Syntax Fix & Memory Saver)
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image
@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 預設常數 (當無法取得動態列表時的備案) ---
+# --- 常數設定 ---
 DEFAULT_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 DEFAULT_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
@@ -52,7 +52,6 @@ def copy_image_button(image_bytes, key_suffix):
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
-            console.error(err);
             msg.innerText = "❌ 失敗";
             msg.style.color = "red";
         }} finally {{
@@ -121,6 +120,7 @@ def upscale_image(image, scale_factor=2):
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 def image_to_base64(image, max_size=(1024, 1024)):
+    # 這裡的縮圖是為了 Gemini API 省錢
     img_copy = image.copy()
     img_copy.thumbnail(max_size, Image.Resampling.LANCZOS)
     buffered = io.BytesIO()
@@ -134,21 +134,17 @@ def image_to_base64(image, max_size=(1024, 1024)):
 # --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
-    # 只保留英數字、底線、減號，徹底移除隱形字元
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
 # --- 新增功能：動態抓取可用模型 ---
-@st.cache_data(ttl=3600) # 快取 1 小時
+@st.cache_data(ttl=3600)
 def fetch_available_models(api_key):
-    """向 Google 查詢此 API Key 可用的所有模型列表"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         response = requests.get(url)
         if response.status_code == 200:
             models = response.json().get('models', [])
             
-            # 1. 篩選分析用模型 (Gemini, 支援 generateContent)
-            # 排除掉 embedding, aqa 等非生成模型
             text_models = [
                 m['name'].replace('models/', '') 
                 for m in models 
@@ -156,9 +152,6 @@ def fetch_available_models(api_key):
                 and 'gemini' in m['name']
             ]
             
-            # 2. 篩選生圖模型 (通常包含 image 關鍵字，或者特定的 Pro Vision)
-            # 由於 API 列表屬性不一定有 image generation 標籤，我們用關鍵字寬鬆篩選
-            # 優先保留使用者已知的好用模型
             image_models = [
                 m['name'].replace('models/', '') 
                 for m in models 
@@ -166,18 +159,14 @@ def fetch_available_models(api_key):
                 and ('image' in m['name'] or 'vision' in m['name'] or 'gemini' in m['name'])
             ]
             
-            # 排序：讓越新的模型 (版本號大) 排前面
             text_models.sort(reverse=True)
             image_models.sort(reverse=True)
-            
             return text_models, image_models
     except:
         pass
-    
-    # 若失敗，回傳預設空清單
     return [], []
 
-# --- 分析函式 (回歸 v1.4 風格 + 5種場景) ---
+# --- 分析函式 (修復網址寫法錯誤) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -190,7 +179,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     設計方向：
     1. 極簡高奢 (Minimalist High-End)
     2. 真實生活感 (Authentic Lifestyle)
-    3. 幾何藝術 (Abstract Geometric)
+    3.幾何藝術 (Abstract Geometric)
     4. 自然有機 (Nature & Organic)
     5. AI 獨家推薦 (AI Recommendation - 根據商品特性，自由發揮一個最獨特且賣座的場景，標題開頭請加 '🤖 AI推薦：')
     
@@ -205,12 +194,15 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        # [✅ 修正點] 確保這是純字串，沒有 Markdown 語法
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
+        params = {"key": api_key} # 使用 params 傳遞 Key 最安全
+        
         res = None
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload)
+                res = requests.post(url, params=params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -219,14 +211,12 @@ def analyze_image_with_gemini(api_key, image, model_name):
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            safe_url = url.split("?")[0]
-            raise Exception(f"連線失敗 (Network Error)。網址: {safe_url}, 錯誤: {str(last_error)}")
+            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
     
     if response.status_code != 200:
-        # 自動降級嘗試 (如果是用 Pro 失敗，試試預設)
         if model_name != DEFAULT_TEXT_MODEL:
              st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
              time.sleep(1)
@@ -251,7 +241,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (回歸 v1.4 風格 + 自動 8K) ---
+# --- 生成函式 (修復網址寫法錯誤) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -266,7 +256,6 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     if user_extra_prompt:
         full_prompt += f"\nAdditional User Requirements: {user_extra_prompt}"
     
-    # 強制全開 8K 畫質
     full_prompt += "\nQuality: 8k ultra-high resolution, extreme detail, 4000px, sharp focus, macro details, commercial standard, ray tracing."
 
     parts = [{"text": full_prompt}]
@@ -277,12 +266,15 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        # [✅ 修正點] 純字串網址
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
+        params = {"key": api_key}
+        
         res = None
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload)
+                res = requests.post(url, params=params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -291,13 +283,12 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線失敗 (Network Error)。錯誤: {str(last_error)}")
+            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
 
     if response.status_code != 200:
-        # 自動降級
         if model_name != DEFAULT_IMAGE_MODEL:
             st.toast(f"⚠️ 模型 {model_name} 異常，嘗試切換至預設模型...", icon="🔄")
             time.sleep(1)
@@ -324,7 +315,7 @@ def get_model_session(name): return new_session(name)
 if 'processed_images' not in st.session_state: st.session_state.processed_images = {}
 if 'prompts' not in st.session_state: st.session_state.prompts = {}
 if 'generated_results' not in st.session_state: st.session_state.generated_results = {}
-if 'fetched_models' not in st.session_state: st.session_state.fetched_models = ([], []) # (text_list, image_list)
+if 'fetched_models' not in st.session_state: st.session_state.fetched_models = ([], [])
 
 # --- 側邊欄 ---
 with st.sidebar:
@@ -335,37 +326,33 @@ with st.sidebar:
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
     final_api_key = clean_api_key(final_api_key)
     
-    # 模型列表 (動態抓取 or 使用預設)
+    # 預設選項
     text_model_options = [DEFAULT_TEXT_MODEL]
     image_model_options = [DEFAULT_IMAGE_MODEL]
     
-    # 若有 Key，嘗試抓取模型清單
+    # 動態抓取模型
     if final_api_key:
-        if st.button("🔄 更新可用模型列表"):
-            with st.spinner("正在向 Google 查詢您的可用模型..."):
+        if st.button("🔄 更新模型列表"):
+            with st.spinner("正在查詢..."):
                 t_list, i_list = fetch_available_models(final_api_key)
                 if t_list:
                     st.session_state.fetched_models = (t_list, i_list)
-                    st.success(f"找到 {len(t_list)} 個文字模型, {len(i_list)} 個影像模型")
-                else:
-                    st.warning("無法取得模型列表，將使用預設值。")
+                    st.success(f"已更新！")
     
-    # 載入 Session 中的模型列表 (如果有)
     if st.session_state.fetched_models[0]:
         text_model_options = st.session_state.fetched_models[0]
-        # 如果抓到的清單包含預設值，確保它在清單中
         if DEFAULT_TEXT_MODEL not in text_model_options: text_model_options.append(DEFAULT_TEXT_MODEL)
-    
     if st.session_state.fetched_models[1]:
         image_model_options = st.session_state.fetched_models[1]
         if DEFAULT_IMAGE_MODEL not in image_model_options: image_model_options.append(DEFAULT_IMAGE_MODEL)
 
     st.divider()
-    model_labels = {"isnet-general-use": "isnet (推薦)", "u2net": "u2net (標準)", "u2netp": "u2netp (快速)"}
-    sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
+    # [關鍵修正]：預設模型改為 u2netp (最輕量)，防止 Streamlit Cloud 記憶體爆掉
+    model_labels = {"u2netp": "u2netp (快速省記憶體-推薦)", "isnet-general-use": "isnet (高細節)", "u2net": "u2net (標準)"}
+    sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x], index=0)
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.28 (Dynamic Model Fetch)")
+    st.caption("v1.29 (Syntax Fix & Memory Saver)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
@@ -374,15 +361,18 @@ if uploaded_files:
     for file in uploaded_files:
         if file.name not in st.session_state.processed_images:
             with st.spinner(f"正在去背: {file.name}..."):
+                # [關鍵修正]：讀取後立刻縮圖，防止記憶體爆炸
                 img = Image.open(file)
-                if max(img.size) > 2048: img.thumbnail((2048, 2048))
+                # 這裡的縮圖是為了保護 Streamlit Server 的 RAM
+                if max(img.size) > 1024: img.thumbnail((1024, 1024)) 
+                
                 out = remove(img, session=session)
                 st.session_state.processed_images[file.name] = {
                     "original_data": pil_to_bytes(img, "JPEG"),
                     "nobg_data": pil_to_bytes(out, "PNG")
                 }
                 del img, out
-                gc.collect()
+                gc.collect() # 強制垃圾回收
 
     st.divider()
     if st.session_state.processed_images:
@@ -411,7 +401,7 @@ if uploaded_files:
                     
                     if st.button("🪄 1. 分析場景 (Analyze)", type="primary", use_container_width=True):
                         try:
-                            with st.spinner(f"分析中 ({selected_text_model})..."):
+                            with st.spinner(f"分析中..."):
                                 st.session_state.prompts[selected_file_name] = analyze_image_with_gemini(final_api_key, nobg_pil, selected_text_model)
                         except Exception as e: st.error(str(e))
 
