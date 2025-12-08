@@ -25,10 +25,19 @@ PRO_IMAGE_MODEL = "gemini-3-pro-image-preview"
 FLASH_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025"
 FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 
+# --- 建立全域連線 Session (終極連線修復) ---
+def get_session():
+    """
+    建立一個乾淨的 Session，並強制忽略系統 Proxy 設定。
+    這能解決 'No connection adapters' 錯誤。
+    """
+    s = requests.Session()
+    s.trust_env = False  # 關鍵：忽略環境變數中的 Proxy 設定
+    return s
+
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
-    
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
         <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
@@ -44,20 +53,15 @@ def copy_image_button(image_bytes, key_suffix):
     async function copyImage_{key_suffix}() {{
         const btn = document.getElementById("btn_{key_suffix}");
         const msg = document.getElementById("msg_{key_suffix}");
-        
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         msg.style.color = "gray";
-
         try {{
-            if (!navigator.clipboard || !navigator.clipboard.write) {{
-                throw new Error("瀏覽器不支援");
-            }}
+            if (!navigator.clipboard || !navigator.clipboard.write) {{ throw new Error("不支援"); }}
             const response = await fetch("data:image/png;base64,{b64_str}");
             const blob = await response.blob();
             const item = new ClipboardItem({{ "image/png": blob }});
             await navigator.clipboard.write([item]);
-            
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
@@ -93,7 +97,6 @@ def bytes_to_pil(image_bytes):
 
 # --- 高品質放大函式 (Upscaling) ---
 def upscale_image(image, scale_factor=2):
-    """使用 Lanczos 演算法進行高品質放大"""
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
@@ -108,21 +111,27 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
-# --- 核心功能：API Key 強力淨化 (保留 v1.15 的優點) ---
+# --- 核心功能：API Key 強力淨化 ---
 def clean_api_key(key):
     if not key: return ""
-    # 只保留英數字、底線、減號，徹底移除隱形字元
-    cleaned_key = re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
-    return cleaned_key
+    return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
 # --- 核心功能：驗證 API Key ---
 def check_pro_model_access(api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent"
+    # 改用 params 傳遞 key
+    params = {"key": api_key}
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
-    try: return requests.post(url, json=payload, timeout=10).status_code == 200 
-    except: return False
+    
+    try: 
+        session = get_session()
+        # timeout 設長一點，避免網路慢誤判
+        res = session.post(url, params=params, json=payload, timeout=20)
+        return res.status_code == 200 
+    except: 
+        return False
 
-# --- 分析函式 (改回 requests.post 簡單連線 + Timeout 保護) ---
+# --- 分析函式 ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -143,19 +152,24 @@ def analyze_image_with_gemini(api_key, image, model_name):
     所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
     "High resolution, 8k, extreme detail, product photography masterpiece, sharp focus, professional lighting, cinematic composition"
     """
+    
+    # 這裡只放純網址，不串接 key
+    base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_str}}]}],
         "generation_config": {"response_mime_type": "application/json"}
     }
     
-    def _send_request(target_model):
-        # 這裡改回最單純的 requests.post，但保留 str() 強制轉型
-        url = str(f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}")
-        res = None
+    def _send_request():
+        session = get_session()
+        # Key 放在 params 裡，讓 requests 自己處理
+        req_params = {"key": api_key}
+        
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload, timeout=60) # 60秒超時
+                res = session.post(base_url, params=req_params, json=payload, timeout=60)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -163,16 +177,18 @@ def analyze_image_with_gemini(api_key, image, model_name):
                 print(f"Attempt {i+1} error: {e}")
             time.sleep(2 ** (i + 1))
         
-        if res is None:
-            raise Exception(f"連線失敗 (Network Error)。請檢查網路或 API Key。詳情: {str(last_error)}")
-        return res
+        if last_error:
+            raise Exception(f"連線失敗 (Proxy/Network)。詳情: {str(last_error)}")
+        raise Exception("連線逾時，無法連接 Google API。")
 
-    response = _send_request(model_name)
+    response = _send_request()
     
+    # 降級邏輯 (需要遞迴呼叫或是簡單處理，這裡簡單處理：若 Pro 失敗，提示使用者重試 Flash)
     if response.status_code != 200 and model_name == PRO_TEXT_MODEL:
-        st.toast(f"⚠️ Pro 模型異常，自動降級...", icon="🔄")
+        st.toast(f"⚠️ Pro 模型異常，嘗試自動切換 Flash...", icon="🔄")
         time.sleep(1)
-        response = _send_request(FLASH_TEXT_MODEL)
+        # 遞迴呼叫 Flash 模型 (注意：這裡直接呼叫 analyze_image_with_gemini 可能會有遞迴深度問題，但只降級一次是安全的)
+        return analyze_image_with_gemini(api_key, image, FLASH_TEXT_MODEL)
     
     if response.status_code != 200:
         if response.status_code == 429: raise Exception("API 配額已達上限 (429)，請稍後再試。")
@@ -194,7 +210,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (改回 requests.post 簡單連線 + Timeout 保護) ---
+# --- 生成函式 ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -218,13 +234,17 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
-    def _send_request(target):
-        url = str(f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}")
-        res = None
+    # 這裡只放純網址
+    base_url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_name}:generateContent"
+
+    def _send_request():
+        session = get_session()
+        req_params = {"key": api_key}
+        
         last_error = None
         for i in range(3):
             try:
-                res = requests.post(url, json=payload, timeout=90) # 90秒超時
+                res = session.post(base_url, params=req_params, json=payload, timeout=90)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -232,16 +252,18 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
                 print(f"Gen Attempt {i+1} error: {e}")
             time.sleep(2 ** (i + 1))
         
-        if res is None:
-            raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
-        return res
+        if last_error:
+            raise Exception(f"連線失敗 (Proxy/Network)。詳情: {str(last_error)}")
+        raise Exception("連線逾時。")
 
-    response = _send_request(model_name)
+    response = _send_request()
 
+    # 降級邏輯
     if response.status_code != 200 and "pro" in model_name:
         st.toast(f"⚠️ Pro 模型異常，自動切換至 Flash...", icon="🔄")
         time.sleep(1)
-        response = _send_request(FLASH_IMAGE_MODEL)
+        # 這裡也是直接呼叫自身，改用 Flash 模型
+        return generate_image_with_gemini(api_key, product_image, base_prompt, FLASH_IMAGE_MODEL, user_extra_prompt, ref_image)
     
     if response.status_code != 200:
         if response.status_code == 429: raise Exception("API 配額已達上限，請稍後再試。")
@@ -272,9 +294,10 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 with st.sidebar:
     st.header("⚙️ 設定")
     raw_api_key = st.text_input("Google API Key (選填)", type="password")
-    user_api_key = clean_api_key(raw_api_key) # 強力淨化
+    user_api_key = clean_api_key(raw_api_key)
     
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
+    # 確保 Secrets 來的 Key 也是乾淨的
     final_api_key = clean_api_key(final_api_key)
     
     if user_api_key and user_api_key != st.session_state.last_validated_key:
@@ -302,7 +325,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.16 (Simplicity & Stability)")
+    st.caption("v1.17 (Proxy Bypass & Params Fix)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
