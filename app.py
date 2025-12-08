@@ -139,16 +139,20 @@ def clean_api_key(key):
 
 # --- 核心功能：驗證 API Key (使用 Params 傳遞) ---
 def check_pro_model_access(api_key):
-    # [修正] 不直接在 url 加 key，改用 params
+    # [修正點] 不要在 URL 後面直接加 ?key=...，這是錯誤根源
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent"
+    
+    # [修正點] 使用 params 參數傳遞 Key，requests 會自動處理所有格式問題
     params = {"key": api_key}
+    
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
+    
     try: 
         # 無限等待，使用 params
         return requests.post(url, params=params, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (使用 Params 傳遞 Key，解決 Adapter Error) ---
+# --- 分析函式 (使用 Params 傳遞 Key，解決連線錯誤) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -176,16 +180,16 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        # [修正] 網址不帶參數
+        # [修正點] 這裡只放純網址
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-        # [修正] 參數用 dict 傳遞
+        # [修正點] 參數放這裡
         query_params = {"key": api_key}
         
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 無限等待，使用 params 確保 URL 安全
+                # [修正點] 傳入 params
                 res = requests.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
@@ -194,10 +198,10 @@ def analyze_image_with_gemini(api_key, image, model_name):
                 print(f"Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
         
-        # 最後一搏
         if res is None:
+            # 這裡不使用 timeout，保持無限等待，但會拋出連線錯誤詳情
             try: return requests.post(url, params=query_params, json=payload)
-            except: raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
+            except: raise Exception(f"連線失敗 (Network Error)。請檢查網路或 API Key。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -254,16 +258,15 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        # [修正] 網址不帶參數
+        # [修正點] 純網址
         url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
-        # [修正] 參數用 dict 傳遞
+        # [修正點] 參數
         query_params = {"key": api_key}
         
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 無限等待，使用 params
                 res = requests.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
