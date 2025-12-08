@@ -8,6 +8,7 @@ import requests
 import json
 import base64
 import gc
+import re  # 新增：正規表達式套件，用於強力淨化
 import streamlit.components.v1 as components
 
 # --- 設定頁面資訊 ---
@@ -27,7 +28,6 @@ FLASH_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 # --- JS 元件：複製圖片到剪貼簿 ---
 def copy_image_button(image_bytes, key_suffix):
     b64_str = base64.b64encode(image_bytes).decode()
-    
     html_code = f"""
     <div style="display: flex; justify-content: center; margin-top: 5px;">
         <button id="btn_{key_suffix}" onclick="copyImage_{key_suffix}()" style="
@@ -43,20 +43,15 @@ def copy_image_button(image_bytes, key_suffix):
     async function copyImage_{key_suffix}() {{
         const btn = document.getElementById("btn_{key_suffix}");
         const msg = document.getElementById("msg_{key_suffix}");
-        
         btn.style.backgroundColor = "#e0e0e0";
         msg.innerText = "⏳...";
         msg.style.color = "gray";
-
         try {{
-            if (!navigator.clipboard || !navigator.clipboard.write) {{
-                throw new Error("瀏覽器不支援");
-            }}
+            if (!navigator.clipboard || !navigator.clipboard.write) {{ throw new Error("不支援"); }}
             const response = await fetch("data:image/png;base64,{b64_str}");
             const blob = await response.blob();
             const item = new ClipboardItem({{ "image/png": blob }});
             await navigator.clipboard.write([item]);
-            
             msg.innerText = "✅ 已複製！";
             msg.style.color = "green";
         }} catch (err) {{
@@ -92,7 +87,6 @@ def bytes_to_pil(image_bytes):
 
 # --- 高品質放大函式 (Upscaling) ---
 def upscale_image(image, scale_factor=2):
-    """使用 Lanczos 演算法進行高品質放大"""
     new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
@@ -107,6 +101,16 @@ def image_to_base64(image, max_size=(1024, 1024)):
         img_copy.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode()
 
+# --- 核心功能：API Key 強力淨化 (關鍵修正) ---
+def clean_api_key(key):
+    if not key: return ""
+    # 1. 先去除前後空白
+    key = key.strip()
+    # 2. 使用 Regex 只保留合法字元 (A-Z, a-z, 0-9, -, _)
+    # 這會把所有隱形字元、空格、換行、引號全部殺掉
+    cleaned_key = re.sub(r'[^a-zA-Z0-9\-\_]', '', key)
+    return cleaned_key
+
 # --- 核心功能：驗證 API Key ---
 def check_pro_model_access(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
@@ -114,13 +118,7 @@ def check_pro_model_access(api_key):
     try: return requests.post(url, json=payload, timeout=15).status_code == 200 
     except: return False
 
-# --- API Key 淨化函式 (新增) ---
-def clean_api_key(key):
-    if not key: return ""
-    # 移除前後空白、中間空白、換行符號
-    return key.strip().replace(" ", "").replace("\n", "").replace("\r", "")
-
-# --- 分析函式 (Timeout 延長至 60s) ---
+# --- 分析函式 ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -135,7 +133,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     2. 真實生活感 (Authentic Lifestyle)
     3. 幾何藝術 (Abstract Geometric)
     4. 自然有機 (Nature & Organic)
-    5. AI 獨家推薦 (AI Recommendation - 由你根據商品特性，自由發揮一個最獨特且賣座的場景)
+    5. AI 獨家推薦 (AI Recommendation)
     
     【重要指令】：
     所有的 prompt 結尾必須強制包含以下高品質關鍵詞：
@@ -157,11 +155,11 @@ def analyze_image_with_gemini(api_key, image, model_name):
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Request attempt {i+1} failed: {e}")
+                print(f"Attempt {i} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線逾時或失敗。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線失敗，請檢查網路或 API Key 格式。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -191,7 +189,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (Timeout 延長至 90s) ---
+# --- 生成函式 ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -226,11 +224,11 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
                     return res
             except Exception as e:
                 last_error = e
-                print(f"Gen Request attempt {i+1} failed: {e}")
+                print(f"Gen Attempt {i} failed: {e}")
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            raise Exception(f"連線逾時。錯誤詳情: {str(last_error)}")
+            raise Exception(f"連線失敗。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -268,15 +266,13 @@ if 'user_model_tier' not in st.session_state: st.session_state.user_model_tier =
 # --- 側邊欄 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    # 接收使用者的輸入
     raw_api_key = st.text_input("Google API Key (選填)", type="password")
     
-    # [關鍵修正]：自動淨化 API Key (移除空格、換行)
+    # 這裡會自動把 Key 清乾淨
     user_api_key = clean_api_key(raw_api_key)
     
-    # 如果使用者沒填，嘗試讀取 Secrets
     final_api_key = user_api_key if user_api_key else st.secrets.get("GEMINI_API_KEY", "")
-    final_api_key = clean_api_key(final_api_key) # Secrets 讀出來的也要清乾淨
+    final_api_key = clean_api_key(final_api_key)
     
     if user_api_key and user_api_key != st.session_state.last_validated_key:
         with st.spinner("驗證 Pro 權限..."):
@@ -303,7 +299,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.13 (API Key Sanitizer)")
+    st.caption("v1.14 (Nuclear Key Cleaner)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
