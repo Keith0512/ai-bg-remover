@@ -137,16 +137,18 @@ def clean_api_key(key):
     if not key: return ""
     return re.sub(r'[^a-zA-Z0-9\-\_]', '', key.strip())
 
-# --- 核心功能：驗證 API Key (回歸 v1.4 無限等待) ---
+# --- 核心功能：驗證 API Key (使用 Params 傳遞) ---
 def check_pro_model_access(api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent?key={api_key}"
+    # [修正] 不直接在 url 加 key，改用 params
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{PRO_TEXT_MODEL}:generateContent"
+    params = {"key": api_key}
     payload = {"contents": [{"parts": [{"text": "Ping"}]}], "generation_config": {"max_output_tokens": 1}}
     try: 
-        # 移除 timeout，只要沒斷線就一直等
-        return requests.post(url, json=payload).status_code == 200 
+        # 無限等待，使用 params
+        return requests.post(url, params=params, json=payload).status_code == 200 
     except: return False
 
-# --- 分析函式 (回歸 v1.4 無限等待) ---
+# --- 分析函式 (使用 Params 傳遞 Key，解決 Adapter Error) ---
 def analyze_image_with_gemini(api_key, image, model_name):
     base64_str = image_to_base64(image)
     
@@ -174,13 +176,17 @@ def analyze_image_with_gemini(api_key, image, model_name):
     }
     
     def _send_request(target_model):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        # [修正] 網址不帶參數
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
+        # [修正] 參數用 dict 傳遞
+        query_params = {"key": api_key}
+        
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 移除 timeout，無限等待
-                res = requests.post(url, json=payload)
+                # 無限等待，使用 params 確保 URL 安全
+                res = requests.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -188,10 +194,10 @@ def analyze_image_with_gemini(api_key, image, model_name):
                 print(f"Error attempt {i}: {e}")
             time.sleep(2 ** (i + 1))
         
-        # 如果還是失敗，嘗試最後一次不帶 try-except，拋出原生錯誤
+        # 最後一搏
         if res is None:
-            try: return requests.post(url, json=payload)
-            except: raise Exception(f"連線失敗 (Network Error)。請檢查網路。詳情: {str(last_error)}")
+            try: return requests.post(url, params=query_params, json=payload)
+            except: raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
         return res
 
     response = _send_request(model_name)
@@ -222,7 +228,7 @@ def analyze_image_with_gemini(api_key, image, model_name):
     except Exception as e:
         raise Exception(f"解析失敗: {str(e)}")
 
-# --- 生成函式 (回歸 v1.4 無限等待) ---
+# --- 生成函式 (使用 Params 傳遞 Key) ---
 def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, user_extra_prompt="", ref_image=None):
     product_b64 = image_to_base64(product_image)
     
@@ -248,13 +254,17 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
     payload = {"contents": [{"parts": parts}], "generation_config": {"response_modalities": ["IMAGE"]}}
     
     def _send_request(target):
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent?key={api_key}"
+        # [修正] 網址不帶參數
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){target}:generateContent"
+        # [修正] 參數用 dict 傳遞
+        query_params = {"key": api_key}
+        
         res = None
         last_error = None
         for i in range(3):
             try:
-                # 移除 timeout，無限等待
-                res = requests.post(url, json=payload)
+                # 無限等待，使用 params
+                res = requests.post(url, params=query_params, json=payload)
                 if res.status_code == 200 or (400 <= res.status_code < 500 and res.status_code != 429): 
                     return res
             except Exception as e:
@@ -263,7 +273,7 @@ def generate_image_with_gemini(api_key, product_image, base_prompt, model_name, 
             time.sleep(2 ** (i + 1))
         
         if res is None:
-            try: return requests.post(url, json=payload)
+            try: return requests.post(url, params=query_params, json=payload)
             except: raise Exception(f"連線失敗 (Network Error)。詳情: {str(last_error)}")
         return res
 
@@ -333,7 +343,7 @@ with st.sidebar:
     sel_mod = st.selectbox("去背模型", list(model_labels.keys()), format_func=lambda x: model_labels[x])
     session = get_model_session(sel_mod)
     st.divider()
-    st.caption("v1.23 (Infinite Patience)")
+    st.caption("v1.24 (Safe URL Construction)")
 
 # --- 主畫面 ---
 uploaded_files = st.file_uploader("1️⃣ 上傳商品圖片", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
